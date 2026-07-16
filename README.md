@@ -99,12 +99,14 @@ py -m pytest
   rolling/Kalman-filter continuously-time-varying hedge ratio is a natural
   future extension (`HedgeRatioModel` in `signals/spread.py` is already an
   interface for this) but isn't implemented.
-- **Window-sensitive results**: `run_screen.py`'s screen and
-  `reporting/daily_report.py`'s daily report use different lookback windows
-  (the screen's full fetch window vs. the report's `lookback_days`, default
-  400), so a pair's `is_cointegrated` flag can legitimately differ between the
-  two outputs in the same run — this reflects real sensitivity of the ADF
-  test to sample length, not a bug.
+- **ADF is window-length sensitive by nature**: `run_screen.py` now passes its
+  own `LOOKBACK_DAYS` through to `generate_daily_signal_report(...,
+  lookback_days=LOOKBACK_DAYS)`, so the screen and the daily report always
+  agree within one run of that script. Calling `generate_daily_signal_report`
+  directly with a different `lookback_days` than whatever screen you're
+  comparing it to will still legitimately produce a different `is_cointegrated`
+  read — that's real sensitivity of the ADF test to sample length, not a bug,
+  just something to keep the window consistent for when comparing by hand.
 - `reporting/daily_report.py` replays the full signal state machine from the
   start of its lookback window on every call; it does not persist an actual
   held position across separate runs. Treat it as a monitoring/research tool,

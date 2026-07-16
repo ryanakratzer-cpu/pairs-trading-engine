@@ -89,7 +89,9 @@ def main() -> None:
     print("\n[4/4] Today's signal report")
     report_pairs = top_pairs or list(zip(passes_screen["ticker_a"], passes_screen["ticker_b"]))[:TOP_N_TO_BACKTEST]
     if report_pairs:
-        report = generate_daily_signal_report(report_pairs, signal_config=SignalConfig())
+        # Same lookback as the screen above, so is_cointegrated here can't
+        # disagree with the screen purely from a shorter default window.
+        report = generate_daily_signal_report(report_pairs, lookback_days=LOOKBACK_DAYS, signal_config=SignalConfig())
         print_report(report)
     else:
         print("  no cointegrated pairs available for a signal report")
