@@ -70,14 +70,28 @@ py -m pytest
   normally.
 - Position sizing is **dollar-neutral per leg** (`capital_per_pair` split
   evenly, e.g. $5k long / $5k short), not hedge-ratio-weighted dollar sizing.
-- The equity curve reflects **realized P&L at each trade's close**, not daily
-  mark-to-market of open positions.
+- The equity curve is **daily mark-to-market**: realized P&L from closed
+  trades plus the unrealized gain/loss on any currently open position, valued
+  at that day's prices. Any position still open at the end of the backtest
+  window is force-liquidated at the final date's price (logged with
+  `exit_reason="END_OF_SAMPLE"`) so total return is always fully realized.
+- `screening.cointegration.screen_universe(..., apply_multiple_testing_correction=True)`
+  additionally requires each pair's ADF p-value survive a Benjamini-Hochberg
+  false-discovery-rate correction across every pair tested (adds a
+  `bh_significant` column). Off by default for the library function; enabled
+  by default in `run_screen.py`, which reports both the raw count and the
+  FDR-corrected count so the caveat is visible without silently gating the
+  demo to zero output when nothing survives correction.
 
 ## Known limitations
 
-- **Multiple-hypothesis testing**: screening ~60-250 pairs at p < 0.05 implies
-  several expected false positives by chance alone; not corrected for (no
-  Bonferroni/Benjamini-Hochberg adjustment) in v1.
+- **Multiple-hypothesis testing**: with `apply_multiple_testing_correction`
+  off (the library default), several expected false positives by chance alone
+  are not corrected for. Turn the flag on for a stricter, FDR-controlled read
+  — in practice, on a ~60-pair screen this can (and did, in an actual live
+  run) flag *zero* survivors even when several pairs pass the raw p<0.05
+  threshold, which is the honest result of testing many hypotheses at once,
+  not a bug.
 - **Survivorship bias**: the default universe is currently-listed, liquid
   tickers only.
 - **Static per-regime hedge ratio**: the hedge ratio is re-estimated

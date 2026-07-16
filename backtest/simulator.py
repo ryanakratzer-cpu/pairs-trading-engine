@@ -1,10 +1,12 @@
 """Portfolio-level backtest simulator for a set of candidate cointegrated pairs.
 
-Equity curve reflects realized P&L at each trade's close (not daily
-mark-to-market of open positions) — a documented simplification. Position
-sizing is dollar-neutral per leg (capital_per_pair split evenly between the
-two legs), not hedge-ratio-weighted dollar sizing — also documented in the
-project README as a v1 simplification.
+Equity curve is daily mark-to-market: realized P&L from closed trades plus the
+unrealized gain/loss on any currently open positions, valued at that day's
+prices. Any position still open at the end of the sample is force-liquidated
+at the final date's price (logged with exit_reason="END_OF_SAMPLE") so total
+return is always fully realized. Position sizing is dollar-neutral per leg
+(capital_per_pair split evenly between the two legs), not hedge-ratio-weighted
+dollar sizing — documented in the project README as a v1 simplification.
 """
 
 from __future__ import annotations
@@ -187,7 +189,41 @@ class PairBacktester:
                     position = 1 if row["event"] == "ENTER_LONG_SPREAD" else -1
                     open_positions[pair_key] = self._open_position(pair_key, position, date, price_a, price_b)
 
-            equity_curve.loc[date] = config.initial_capital + realized_pnl
+            unrealized_pnl = 0.0
+            for pair_key, open_pos in open_positions.items():
+                pair_data = prepared[pair_key]
+                if date not in pair_data["prices"].index:
+                    continue
+                price_a = pair_data["prices"].loc[date, pair_key[0]]
+                price_b = pair_data["prices"].loc[date, pair_key[1]]
+                unrealized_pnl += self._mark_to_market(open_pos, price_a, price_b)
+
+            equity_curve.loc[date] = config.initial_capital + realized_pnl + unrealized_pnl
+
+        if open_positions:
+            last_date = all_dates[-1]
+            for pair_key, open_pos in list(open_positions.items()):
+                pair_data = prepared[pair_key]
+                if last_date not in pair_data["prices"].index:
+                    continue
+                price_a = pair_data["prices"].loc[last_date, pair_key[0]]
+                price_b = pair_data["prices"].loc[last_date, pair_key[1]]
+                pnl = self._close_position(open_pos, price_a, price_b)
+                realized_pnl += pnl
+                trade_log_rows.append(
+                    {
+                        "ticker_a": pair_key[0],
+                        "ticker_b": pair_key[1],
+                        "position": open_pos.position,
+                        "entry_date": open_pos.entry_date,
+                        "exit_date": last_date,
+                        "holding_days": (last_date - open_pos.entry_date).days,
+                        "pnl": pnl,
+                        "exit_reason": "END_OF_SAMPLE",
+                    }
+                )
+            open_positions.clear()
+            equity_curve.loc[last_date] = config.initial_capital + realized_pnl
 
         trade_log = pd.DataFrame(trade_log_rows)
         return {
@@ -215,19 +251,25 @@ class PairBacktester:
             entry_cost=entry_cost,
         )
 
-    def _close_position(self, open_pos: _OpenPosition, exit_price_a: float, exit_price_b: float) -> float:
-        config = self.config
+    def _mark_to_market(self, open_pos: _OpenPosition, price_a: float, price_b: float) -> float:
+        """Unrealized P&L if `open_pos` were valued at (price_a, price_b) right now:
+        gross gain/loss on both legs minus the entry cost already paid. Exit cost
+        is not deducted here — it's only realized when the position actually closes.
+        """
         if open_pos.position == 1:  # long A, short B
-            gross_pnl = open_pos.shares_a * (exit_price_a - open_pos.entry_price_a) + open_pos.shares_b * (
-                open_pos.entry_price_b - exit_price_b
+            gross_pnl = open_pos.shares_a * (price_a - open_pos.entry_price_a) + open_pos.shares_b * (
+                open_pos.entry_price_b - price_b
             )
         else:  # short A, long B
-            gross_pnl = open_pos.shares_a * (open_pos.entry_price_a - exit_price_a) + open_pos.shares_b * (
-                exit_price_b - open_pos.entry_price_b
+            gross_pnl = open_pos.shares_a * (open_pos.entry_price_a - price_a) + open_pos.shares_b * (
+                price_b - open_pos.entry_price_b
             )
+        return gross_pnl - open_pos.entry_cost
 
+    def _close_position(self, open_pos: _OpenPosition, exit_price_a: float, exit_price_b: float) -> float:
+        config = self.config
+        unrealized = self._mark_to_market(open_pos, exit_price_a, exit_price_b)
         notional_exit = open_pos.shares_a * exit_price_a + open_pos.shares_b * exit_price_b
         cost_rate = (config.transaction_cost_bps + config.slippage_bps) / 10_000
         exit_cost = cost_rate * notional_exit
-
-        return gross_pnl - open_pos.entry_cost - exit_cost
+        return unrealized - exit_cost

@@ -42,6 +42,62 @@ def test_close_position_short_spread_pnl_zero_costs():
     assert pnl > 0  # A fell, B rose — favorable for a short-spread position
 
 
+def test_mark_to_market_matches_close_minus_exit_cost():
+    config = PairBacktestConfig(transaction_cost_bps=8.0, slippage_bps=2.0, capital_per_pair=10_000.0)
+    backtester = PairBacktester(config)
+    open_pos = backtester._open_position(
+        ("A", "B"), position=1, date=pd.Timestamp("2023-01-02"), price_a=100.0, price_b=50.0
+    )
+
+    unrealized = backtester._mark_to_market(open_pos, price_a=105.0, price_b=48.0)
+    closed_pnl = backtester._close_position(open_pos, exit_price_a=105.0, exit_price_b=48.0)
+
+    notional_exit = open_pos.shares_a * 105.0 + open_pos.shares_b * 48.0
+    exit_cost = ((config.transaction_cost_bps + config.slippage_bps) / 10_000) * notional_exit
+
+    assert unrealized > 0  # A rose, B fell — favorable mark for a long-spread position
+    assert closed_pnl == pytest.approx(unrealized - exit_cost)
+
+
+def test_open_position_still_open_at_data_end_is_force_liquidated(cointegrated_pair_prices):
+    price_a, price_b, _hedge_ratio_true, _theta = cointegrated_pair_prices
+
+    # First pass over the full series to find a date where a position is open.
+    config = PairBacktestConfig(
+        recheck_window_days=100,
+        recheck_freq_days=50,
+        signal_config=SignalConfig(zscore_window=15, entry_z=1.0, exit_z=0.3, stop_z=4.0),
+        max_concurrent_pairs=1,
+    )
+    panel = pd.concat([price_a.rename("A"), price_b.rename("B")], axis=1)
+    full_result = PairBacktester(config).run(panel, [("A", "B")])
+    assert not full_result["trade_log"].empty
+
+    # Find a trade that was held for more than one bar, so there's an interior
+    # date strictly between entry and exit to truncate the series at.
+    trade_log = full_result["trade_log"]
+    entry_idx = trade_log["entry_date"].map(panel.index.get_loc)
+    exit_idx = trade_log["exit_date"].map(panel.index.get_loc)
+    multi_bar_trades = trade_log[(exit_idx - entry_idx) >= 2]
+    assert not multi_bar_trades.empty, "expected at least one trade held for 2+ bars"
+    first_multi_bar_trade = multi_bar_trades.iloc[0]
+    truncate_at_idx = panel.index.get_loc(first_multi_bar_trade["entry_date"]) + 1  # one bar into the trade
+
+    # Truncate the data so the series ends while that trade is still open, then
+    # confirm the truncated run force-closes it instead of leaving it dangling.
+    truncated_panel = panel.iloc[: truncate_at_idx + 1]
+    truncated_result = PairBacktester(config).run(truncated_panel, [("A", "B")])
+
+    assert not truncated_result["trade_log"].empty
+    last_trade = truncated_result["trade_log"].iloc[-1]
+    assert last_trade["exit_date"] == truncated_panel.index[-1]
+    assert last_trade["exit_reason"] == "END_OF_SAMPLE"
+
+    final_equity = truncated_result["equity_curve"].iloc[-1]
+    total_pnl = truncated_result["trade_log"]["pnl"].sum()
+    assert final_equity == pytest.approx(config.initial_capital + total_pnl)
+
+
 def test_regime_hedge_ratio_disables_after_cointegration_breaks_down():
     dates = pd.bdate_range("2023-01-02", periods=400)
     n = len(dates)

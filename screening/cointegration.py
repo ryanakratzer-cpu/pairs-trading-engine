@@ -96,6 +96,25 @@ def compute_half_life(spread: pd.Series) -> float | None:
     return float(np.log(2) / -slope)
 
 
+def _benjamini_hochberg(pvalues: pd.Series, fdr_level: float) -> pd.Series:
+    """Benjamini-Hochberg FDR procedure: find the largest rank k (p-values
+    sorted ascending) with p_(k) <= (k/n)*fdr_level, then flag ranks 1..k as
+    significant. Returns a boolean Series aligned to `pvalues`'s index.
+    """
+    n = len(pvalues)
+    order = pvalues.sort_values().index
+    ranks = np.arange(1, n + 1)
+    thresholds = (ranks / n) * fdr_level
+    sorted_pvalues = pvalues.loc[order].to_numpy()
+    passes = sorted_pvalues <= thresholds
+
+    significant = pd.Series(False, index=pvalues.index)
+    if passes.any():
+        cutoff_rank = int(np.max(np.where(passes)[0])) + 1
+        significant.loc[order[:cutoff_rank]] = True
+    return significant
+
+
 def screen_universe(
     price_panel: pd.DataFrame,
     pairs: list[tuple[str, str]],
@@ -103,6 +122,8 @@ def screen_universe(
     use_log_prices: bool = True,
     min_half_life_days: float = DEFAULT_MIN_HALF_LIFE_DAYS,
     max_half_life_days: float = DEFAULT_MAX_HALF_LIFE_DAYS,
+    apply_multiple_testing_correction: bool = False,
+    fdr_level: float = DEFAULT_SIGNIFICANCE,
 ) -> pd.DataFrame:
     """Test every candidate pair for cointegration and flag those in a tradeable half-life band.
 
@@ -110,6 +131,14 @@ def screen_universe(
     that fail cointegration or the half-life filter are included and flagged
     (is_cointegrated / passes_half_life_filter / tradeable columns) rather than
     silently dropped, so the screen is auditable end to end.
+
+    Screening many pairs at a fixed significance level guarantees some false
+    positives by chance (e.g. ~5 expected out of 100 pairs at p<0.05). Set
+    apply_multiple_testing_correction=True to additionally require each pair's
+    ADF p-value survive a Benjamini-Hochberg false-discovery-rate correction
+    across all pairs tested (adds a `bh_significant` column; `tradeable` then
+    requires both is_cointegrated, the half-life filter, AND bh_significant).
+    Off by default to preserve v1 behavior.
     """
     rows = []
     for ticker_a, ticker_b in pairs:
@@ -150,4 +179,11 @@ def screen_universe(
     results = pd.DataFrame(rows)
     if results.empty:
         return results
+
+    if apply_multiple_testing_correction:
+        results["bh_significant"] = _benjamini_hochberg(results["adf_pvalue"], fdr_level)
+        results["tradeable"] = results["tradeable"] & results["bh_significant"]
+    else:
+        results["bh_significant"] = None
+
     return results.sort_values("adf_pvalue", ascending=True).reset_index(drop=True)
