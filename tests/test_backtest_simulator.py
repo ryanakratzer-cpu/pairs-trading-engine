@@ -1,0 +1,107 @@
+import numpy as np
+import pandas as pd
+import pytest
+
+from backtest.simulator import PairBacktestConfig, PairBacktester, _build_regime_hedge_ratios
+from signals.spread import SignalConfig
+
+
+def test_close_position_long_spread_pnl_and_costs():
+    config = PairBacktestConfig(transaction_cost_bps=10.0, slippage_bps=0.0, capital_per_pair=10_000.0)
+    backtester = PairBacktester(config)
+    open_pos = backtester._open_position(
+        ("A", "B"), position=1, date=pd.Timestamp("2023-01-02"), price_a=100.0, price_b=50.0
+    )
+
+    assert open_pos.shares_a == pytest.approx(5_000.0 / 100.0)
+    assert open_pos.shares_b == pytest.approx(5_000.0 / 50.0)
+    assert open_pos.entry_cost == pytest.approx((10.0 / 10_000) * 10_000.0)
+
+    pnl = backtester._close_position(open_pos, exit_price_a=110.0, exit_price_b=45.0)
+
+    gross = open_pos.shares_a * (110.0 - 100.0) + open_pos.shares_b * (50.0 - 45.0)
+    notional_exit = open_pos.shares_a * 110.0 + open_pos.shares_b * 45.0
+    exit_cost = (10.0 / 10_000) * notional_exit
+    expected_pnl = gross - open_pos.entry_cost - exit_cost
+
+    assert pnl == pytest.approx(expected_pnl)
+    assert pnl > 0  # A rose, B fell — favorable for a long-spread position
+
+
+def test_close_position_short_spread_pnl_zero_costs():
+    config = PairBacktestConfig(transaction_cost_bps=0.0, slippage_bps=0.0, capital_per_pair=10_000.0)
+    backtester = PairBacktester(config)
+    open_pos = backtester._open_position(
+        ("A", "B"), position=-1, date=pd.Timestamp("2023-01-02"), price_a=100.0, price_b=50.0
+    )
+
+    pnl = backtester._close_position(open_pos, exit_price_a=90.0, exit_price_b=55.0)
+
+    gross = open_pos.shares_a * (100.0 - 90.0) + open_pos.shares_b * (55.0 - 50.0)
+    assert pnl == pytest.approx(gross)
+    assert pnl > 0  # A fell, B rose — favorable for a short-spread position
+
+
+def test_regime_hedge_ratio_disables_after_cointegration_breaks_down():
+    dates = pd.bdate_range("2023-01-02", periods=400)
+    n = len(dates)
+    rng = np.random.default_rng(7)
+
+    log_b = np.cumsum(0.01 * rng.standard_normal(n)) + np.log(60)
+    ou = np.zeros(n)
+    for t in range(1, 150):
+        ou[t] = ou[t - 1] + 0.15 * (0.0 - ou[t - 1]) + 0.02 * rng.standard_normal()
+    for t in range(150, n):
+        ou[t] = ou[t - 1] + 0.02 * rng.standard_normal() + 0.01  # permanent drift, no reversion
+
+    log_a = 0.9 * log_b + ou
+    price_a = pd.Series(np.exp(log_a), index=dates)
+    price_b = pd.Series(np.exp(log_b), index=dates)
+
+    config = PairBacktestConfig(recheck_window_days=100, recheck_freq_days=50)
+    _hedge_ratios, tradeable = _build_regime_hedge_ratios(price_a, price_b, config)
+
+    assert tradeable.iloc[100:150].any()  # regime estimated from pre-break data
+    assert not tradeable.iloc[-50:].any()  # regime estimated entirely from broken-down data
+
+
+def test_max_concurrent_pairs_enforced(sector_universe_fixture):
+    panel, (ticker_a, ticker_b) = sector_universe_fixture
+    pairs = [(ticker_a, ticker_b), ("CCC", "DDD")]
+
+    config = PairBacktestConfig(
+        recheck_window_days=100,
+        recheck_freq_days=50,
+        signal_config=SignalConfig(zscore_window=15, entry_z=1.0, exit_z=0.3, stop_z=4.0),
+        max_concurrent_pairs=1,
+    )
+    result = PairBacktester(config).run(panel, pairs)
+
+    # A closed position frees its slot the same day a new one can open it, so
+    # exit_date is exclusive here — otherwise a same-day handoff double-counts.
+    open_count = pd.Series(0, index=result["equity_curve"].index)
+    for _, trade in result["trade_log"].iterrows():
+        span = (open_count.index >= trade["entry_date"]) & (open_count.index < trade["exit_date"])
+        open_count[span] += 1
+
+    assert open_count.max() <= config.max_concurrent_pairs
+
+
+def test_end_to_end_backtest_smoke(sector_universe_fixture):
+    panel, (ticker_a, ticker_b) = sector_universe_fixture
+    pairs = [(ticker_a, ticker_b), ("CCC", "DDD")]
+
+    config = PairBacktestConfig(
+        recheck_window_days=100,
+        recheck_freq_days=50,
+        signal_config=SignalConfig(zscore_window=15, entry_z=1.0, exit_z=0.3, stop_z=4.0),
+        max_concurrent_pairs=2,
+    )
+    result = PairBacktester(config).run(panel, pairs)
+
+    assert len(result["equity_curve"]) == len(panel)
+    assert not result["trade_log"].empty
+
+    final_equity = result["equity_curve"].iloc[-1]
+    total_pnl = result["trade_log"]["pnl"].sum()
+    assert final_equity == pytest.approx(config.initial_capital + total_pnl)
