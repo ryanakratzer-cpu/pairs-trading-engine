@@ -3,7 +3,7 @@ import pandas as pd
 import pytest
 from statsmodels.tsa.stattools import coint
 
-from screening.cointegration import _benjamini_hochberg, compute_half_life, screen_universe
+from screening.cointegration import _benjamini_hochberg, compute_half_life, screen_universe, validate_out_of_sample
 from screening.cointegration import test_pair_cointegration as engle_granger_test
 
 
@@ -88,3 +88,98 @@ def test_screen_universe_multiple_testing_correction_is_opt_in_and_never_loosens
     tradeable_pairs_corrected = set(zip(corrected.loc[corrected["tradeable"], "ticker_a"], corrected.loc[corrected["tradeable"], "ticker_b"]))
     tradeable_pairs_uncorrected = set(zip(uncorrected.loc[uncorrected["tradeable"], "ticker_a"], uncorrected.loc[uncorrected["tradeable"], "ticker_b"]))
     assert tradeable_pairs_corrected <= tradeable_pairs_uncorrected
+
+
+def test_out_of_sample_validates_a_persistent_relationship():
+    # Stronger/longer than the shared cointegrated_pair_prices fixture: applying
+    # the formation-fitted hedge ratio (not re-estimated) to a held-out window
+    # is a stricter test, so this needs enough signal to stay significant there
+    # too, not just over the full sample.
+    dates = pd.bdate_range("2023-01-02", periods=600)
+    n = len(dates)
+    rng_b = np.random.default_rng(31)
+    rng_ou = np.random.default_rng(32)
+
+    hedge_ratio_true = 0.75
+    theta = 0.2
+    log_b = np.cumsum(0.01 * rng_b.standard_normal(n)) + np.log(80)
+    ou = np.zeros(n)
+    for t in range(1, n):
+        ou[t] = ou[t - 1] + theta * (0.0 - ou[t - 1]) + 0.015 * rng_ou.standard_normal()
+    log_a = hedge_ratio_true * log_b + ou
+
+    price_a = pd.Series(np.exp(log_a), index=dates, name="A")
+    price_b = pd.Series(np.exp(log_b), index=dates, name="B")
+
+    result = validate_out_of_sample(price_a, price_b, ticker_a="A", ticker_b="B")
+
+    assert result.formation_is_cointegrated
+    assert result.validation_is_stationary
+    assert result.out_of_sample_validated
+    assert result.formation_hedge_ratio == pytest.approx(hedge_ratio_true, abs=0.15)
+
+
+def test_out_of_sample_rejects_a_relationship_that_breaks_down_after_formation():
+    # Cointegrated for the formation window, then permanently drifts (no mean
+    # reversion) for the entire validation window — a pair that looks like a
+    # great in-sample find but would never have been tradeable going forward.
+    dates = pd.bdate_range("2023-01-02", periods=500)
+    n = len(dates)
+    split_idx = int(n * 0.7)
+    rng = np.random.default_rng(21)
+
+    log_b = np.cumsum(0.01 * rng.standard_normal(n)) + np.log(60)
+    ou = np.zeros(n)
+    for t in range(1, split_idx):
+        ou[t] = ou[t - 1] + 0.15 * (0.0 - ou[t - 1]) + 0.02 * rng.standard_normal()
+    for t in range(split_idx, n):
+        ou[t] = ou[t - 1] + 0.02 * rng.standard_normal() + 0.015  # permanent drift, no reversion
+
+    log_a = 0.9 * log_b + ou
+    price_a = pd.Series(np.exp(log_a), index=dates, name="A")
+    price_b = pd.Series(np.exp(log_b), index=dates, name="B")
+
+    result = validate_out_of_sample(price_a, price_b, ticker_a="A", ticker_b="B", formation_fraction=0.7)
+
+    assert result.formation_is_cointegrated
+    assert not result.validation_is_stationary
+    assert not result.out_of_sample_validated
+
+
+def test_out_of_sample_short_circuits_on_failed_formation(non_cointegrated_pair_prices):
+    price_a, price_b = non_cointegrated_pair_prices
+    result = validate_out_of_sample(price_a, price_b, ticker_a="A", ticker_b="B")
+
+    assert not result.formation_is_cointegrated
+    assert not result.out_of_sample_validated
+
+
+def test_out_of_sample_raises_on_insufficient_data():
+    dates = pd.bdate_range("2023-01-02", periods=40)
+    price_a = pd.Series(np.linspace(100, 110, 40), index=dates)
+    price_b = pd.Series(np.linspace(50, 55, 40), index=dates)
+
+    with pytest.raises(ValueError):
+        validate_out_of_sample(price_a, price_b, formation_fraction=0.7)
+
+
+def test_screen_universe_out_of_sample_validation_is_opt_in_and_never_loosens_tradeable(
+    sector_universe_fixture,
+):
+    panel, (ticker_a, ticker_b) = sector_universe_fixture
+    pairs = [(ticker_a, ticker_b), ("CCC", "DDD"), ("AAA", "CCC"), ("BBB", "DDD")]
+
+    without_oos = screen_universe(panel, pairs, min_half_life_days=1.0, max_half_life_days=60.0)
+    with_oos = screen_universe(
+        panel,
+        pairs,
+        min_half_life_days=1.0,
+        max_half_life_days=60.0,
+        require_out_of_sample_validation=True,
+    )
+
+    assert without_oos["oos_validated"].isna().all()  # not computed unless opted in
+    assert with_oos["oos_validated"].isin([True, False]).all()
+    tradeable_with = set(zip(with_oos.loc[with_oos["tradeable"], "ticker_a"], with_oos.loc[with_oos["tradeable"], "ticker_b"]))
+    tradeable_without = set(zip(without_oos.loc[without_oos["tradeable"], "ticker_a"], without_oos.loc[without_oos["tradeable"], "ticker_b"]))
+    assert tradeable_with <= tradeable_without

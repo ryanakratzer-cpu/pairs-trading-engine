@@ -43,13 +43,20 @@ def main() -> None:
     print(f"  {prices.shape[1]} tickers, {prices.shape[0]} trading days retained")
 
     print(f"\n[2/4] Screening {len(pairs)} candidate pairs for cointegration")
-    results = screen_universe(prices, pairs, apply_multiple_testing_correction=True)
+    results = screen_universe(
+        prices,
+        pairs,
+        apply_multiple_testing_correction=True,
+        require_out_of_sample_validation=True,
+    )
     passes_screen = results[results["is_cointegrated"] & results["passes_half_life_filter"]]
     n_bh_survivors = int(results["bh_significant"].sum())
+    oos_survivors = results[results["oos_validated"] == True]  # noqa: E712 (nullable bool column)
     print(
         f"  {len(passes_screen)}/{len(results)} pairs pass cointegration + half-life at p<0.05; "
-        f"only {n_bh_survivors} additionally survive Benjamini-Hochberg FDR correction across "
-        f"all {len(results)} pairs tested"
+        f"{n_bh_survivors} additionally survive Benjamini-Hochberg FDR correction; "
+        f"{len(oos_survivors)} hold up when the formation-window hedge ratio is tested on a "
+        f"held-out validation window it never saw"
     )
     if n_bh_survivors == 0 and len(passes_screen) > 0:
         print(
@@ -60,12 +67,20 @@ def main() -> None:
     heatmap_path = plot_cointegration_heatmap(results.head(20), title="live_cointegration_pvalues")
     print(f"  saved {heatmap_path}")
 
-    # Backtest/report on the pre-correction survivors (ranked by ADF p-value, the
-    # strongest raw evidence first) — the FDR-corrected count above is the honest
-    # caveat on how much to trust them, not a gate on what gets demonstrated here.
-    top_pairs = list(zip(passes_screen["ticker_a"], passes_screen["ticker_b"]))[:TOP_N_TO_BACKTEST]
+    # Backtest/report on the out-of-sample survivors when there are any — this is
+    # the strongest available filter, since it directly tests whether the fitted
+    # relationship holds on data the formation fit never saw. Fall back to the raw
+    # p<0.05 pool (clearly labeled) so the pipeline still demonstrates end to end
+    # when nothing clears the OOS bar yet.
+    if len(oos_survivors) > 0:
+        selection_note = "out-of-sample validated"
+        selected = oos_survivors
+    else:
+        selection_note = "raw p<0.05 only - NONE passed out-of-sample validation, treat as exploratory"
+        selected = passes_screen
+    top_pairs = list(zip(selected["ticker_a"], selected["ticker_b"]))[:TOP_N_TO_BACKTEST]
 
-    print(f"\n[3/4] Backtesting top {TOP_N_TO_BACKTEST} surviving pairs ({RISK_PROFILE} risk profile)")
+    print(f"\n[3/4] Backtesting top {TOP_N_TO_BACKTEST} pairs ({selection_note}, {RISK_PROFILE} risk profile)")
     if not top_pairs:
         print("  no pairs passed the screen - skipping backtest")
     else:
@@ -88,7 +103,7 @@ def main() -> None:
             print(f"  saved {spread_plot}")
 
     print("\n[4/4] Today's signal report")
-    report_pairs = top_pairs or list(zip(passes_screen["ticker_a"], passes_screen["ticker_b"]))[:TOP_N_TO_BACKTEST]
+    report_pairs = top_pairs
     if report_pairs:
         # Same lookback as the screen above, so is_cointegrated here can't
         # disagree with the screen purely from a shorter default window.

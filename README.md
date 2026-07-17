@@ -88,6 +88,21 @@ py -m pytest
   and `.aggressive()` (larger size, more concurrent pairs, looser entry/stop).
   `run_screen.py`'s `RISK_PROFILE` constant selects which one it backtests
   with.
+- `screening.cointegration.screen_universe(..., require_out_of_sample_validation=True)`
+  additionally requires each pair survive `validate_out_of_sample()`: split
+  the series into an earlier formation window and a later held-out validation
+  window (`formation_fraction`, default 0.7), fit the hedge ratio and test
+  cointegration on formation data only, then apply that *same* hedge ratio
+  (never re-estimated) to the validation window and ADF-test whether the
+  spread is still stationary there. Adds `oos_formation_pvalue` /
+  `oos_validation_pvalue` / `oos_validated` columns; `tradeable` then also
+  requires `oos_validated`. This is a stronger filter than FDR correction
+  alone — FDR controls false discoveries across pairs, but says nothing about
+  whether any single "significant" pair will hold up going forward. Off by
+  default for the library function; enabled by default in `run_screen.py`,
+  which backtests the out-of-sample survivors when there are any, and falls
+  back to the raw p<0.05 pool (clearly labeled as unvalidated/exploratory)
+  when there aren't, rather than silently going empty.
 
 ## Known limitations
 
@@ -98,6 +113,17 @@ py -m pytest
   run) flag *zero* survivors even when several pairs pass the raw p<0.05
   threshold, which is the honest result of testing many hypotheses at once,
   not a bug.
+- **Current default universe (as of 2026-07-16) has no validated edge.** With
+  both `apply_multiple_testing_correction` and `require_out_of_sample_validation`
+  on, a live screen of the 29-ticker/6-sector default universe returned zero
+  pairs surviving either filter — the 8 pairs that pass the raw p<0.05 +
+  half-life screen all had out-of-sample validation p-values between 0.11 and
+  0.79 (nowhere close to significant): they looked cointegrated in-sample and
+  did not hold up on held-out data. This isn't a code bug; it's the honest
+  result of testing a fairly small, correlated (mostly same-sector) universe.
+  Widening the universe (more sectors, more tickers, less within-sector
+  correlation among candidates) is the natural next step before trusting any
+  pair enough to size real capital into it.
 - **Survivorship bias**: the default universe is currently-listed, liquid
   tickers only.
 - **Static per-regime hedge ratio**: the hedge ratio is re-estimated

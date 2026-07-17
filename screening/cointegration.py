@@ -13,6 +13,7 @@ DEFAULT_SIGNIFICANCE = 0.05
 DEFAULT_MIN_HALF_LIFE_DAYS = 5.0
 DEFAULT_MAX_HALF_LIFE_DAYS = 30.0
 MIN_OBSERVATIONS = 30
+DEFAULT_FORMATION_FRACTION = 0.7
 
 
 @dataclass(frozen=True)
@@ -25,6 +26,20 @@ class EngleGrangerResult:
     adf_pvalue: float
     is_cointegrated: bool
     half_life_days: float | None
+
+
+@dataclass(frozen=True)
+class OutOfSampleResult:
+    ticker_a: str
+    ticker_b: str
+    formation_hedge_ratio: float
+    formation_pvalue: float
+    formation_is_cointegrated: bool
+    validation_adf_stat: float
+    validation_pvalue: float
+    validation_is_stationary: bool
+    validation_half_life_days: float | None
+    out_of_sample_validated: bool
 
 
 def _to_series(prices: pd.Series, use_log_prices: bool) -> pd.Series:
@@ -96,6 +111,69 @@ def compute_half_life(spread: pd.Series) -> float | None:
     return float(np.log(2) / -slope)
 
 
+def validate_out_of_sample(
+    price_a: pd.Series,
+    price_b: pd.Series,
+    ticker_a: str = "A",
+    ticker_b: str = "B",
+    formation_fraction: float = DEFAULT_FORMATION_FRACTION,
+    significance: float = DEFAULT_SIGNIFICANCE,
+    use_log_prices: bool = True,
+) -> OutOfSampleResult:
+    """Split the series into an earlier formation window and a later, held-out
+    validation window. Fit the hedge ratio and test cointegration on the
+    formation window only, then apply that SAME hedge ratio (not re-estimated)
+    to the validation window and ADF-test whether the resulting spread is still
+    stationary there. A pair only counts as out-of-sample validated if both
+    windows pass — this catches relationships that were fit to noise in the
+    formation window and wouldn't actually have been tradeable going forward,
+    which a single in-sample test (or FDR correction alone) can't catch.
+    """
+    n = len(price_a)
+    split_idx = int(n * formation_fraction)
+    if split_idx < MIN_OBSERVATIONS or (n - split_idx) < MIN_OBSERVATIONS:
+        raise ValueError(
+            f"Not enough data to split into formation/validation windows: "
+            f"{n} observations, formation_fraction={formation_fraction} "
+            f"(need >= {MIN_OBSERVATIONS} on each side)"
+        )
+
+    formation_a, formation_b = price_a.iloc[:split_idx], price_b.iloc[:split_idx]
+    validation_a, validation_b = price_a.iloc[split_idx:], price_b.iloc[split_idx:]
+
+    formation_result = test_pair_cointegration(
+        formation_a,
+        formation_b,
+        ticker_a=ticker_a,
+        ticker_b=ticker_b,
+        significance=significance,
+        use_log_prices=use_log_prices,
+    )
+
+    val_a = _to_series(validation_a, use_log_prices).astype(float).to_numpy()
+    val_b = _to_series(validation_b, use_log_prices).astype(float).to_numpy()
+    validation_spread = val_a - formation_result.hedge_ratio * val_b - formation_result.intercept
+
+    validation_adf_stat, validation_pvalue, *_ = adfuller(validation_spread, autolag="AIC")
+    validation_is_stationary = validation_pvalue < significance
+    validation_half_life = (
+        compute_half_life(pd.Series(validation_spread)) if validation_is_stationary else None
+    )
+
+    return OutOfSampleResult(
+        ticker_a=ticker_a,
+        ticker_b=ticker_b,
+        formation_hedge_ratio=formation_result.hedge_ratio,
+        formation_pvalue=formation_result.adf_pvalue,
+        formation_is_cointegrated=formation_result.is_cointegrated,
+        validation_adf_stat=float(validation_adf_stat),
+        validation_pvalue=float(validation_pvalue),
+        validation_is_stationary=validation_is_stationary,
+        validation_half_life_days=validation_half_life,
+        out_of_sample_validated=formation_result.is_cointegrated and validation_is_stationary,
+    )
+
+
 def _benjamini_hochberg(pvalues: pd.Series, fdr_level: float) -> pd.Series:
     """Benjamini-Hochberg FDR procedure: find the largest rank k (p-values
     sorted ascending) with p_(k) <= (k/n)*fdr_level, then flag ranks 1..k as
@@ -124,6 +202,8 @@ def screen_universe(
     max_half_life_days: float = DEFAULT_MAX_HALF_LIFE_DAYS,
     apply_multiple_testing_correction: bool = False,
     fdr_level: float = DEFAULT_SIGNIFICANCE,
+    require_out_of_sample_validation: bool = False,
+    formation_fraction: float = DEFAULT_FORMATION_FRACTION,
 ) -> pd.DataFrame:
     """Test every candidate pair for cointegration and flag those in a tradeable half-life band.
 
@@ -139,6 +219,16 @@ def screen_universe(
     across all pairs tested (adds a `bh_significant` column; `tradeable` then
     requires both is_cointegrated, the half-life filter, AND bh_significant).
     Off by default to preserve v1 behavior.
+
+    Set require_out_of_sample_validation=True to additionally require the pair
+    survive validate_out_of_sample() — the formation-window hedge ratio applied
+    to a held-out validation window must still produce a stationary spread
+    (adds oos_formation_pvalue / oos_validation_pvalue / oos_validated columns;
+    `tradeable` then also requires oos_validated). This catches relationships
+    that were fit to noise in-sample and wouldn't have held up going forward,
+    which neither the base test nor the FDR correction can catch on their own.
+    Pairs with too little data to split (< 2 * MIN_OBSERVATIONS per side) are
+    marked oos_validated=False rather than raising.
     """
     rows = []
     for ticker_a, ticker_b in pairs:
@@ -162,23 +252,49 @@ def screen_universe(
             and min_half_life_days <= result.half_life_days <= max_half_life_days
         )
 
-        rows.append(
-            {
-                "ticker_a": result.ticker_a,
-                "ticker_b": result.ticker_b,
-                "hedge_ratio": result.hedge_ratio,
-                "adf_stat": result.adf_stat,
-                "adf_pvalue": result.adf_pvalue,
-                "is_cointegrated": result.is_cointegrated,
-                "half_life_days": result.half_life_days,
-                "passes_half_life_filter": passes_half_life,
-                "tradeable": result.is_cointegrated and passes_half_life,
-            }
-        )
+        row = {
+            "ticker_a": result.ticker_a,
+            "ticker_b": result.ticker_b,
+            "hedge_ratio": result.hedge_ratio,
+            "adf_stat": result.adf_stat,
+            "adf_pvalue": result.adf_pvalue,
+            "is_cointegrated": result.is_cointegrated,
+            "half_life_days": result.half_life_days,
+            "passes_half_life_filter": passes_half_life,
+            "tradeable": result.is_cointegrated and passes_half_life,
+        }
+
+        if require_out_of_sample_validation:
+            min_split_obs = MIN_OBSERVATIONS * 2
+            if len(pair_prices) < min_split_obs:
+                row["oos_formation_pvalue"] = None
+                row["oos_validation_pvalue"] = None
+                row["oos_validated"] = False
+            else:
+                oos_result = validate_out_of_sample(
+                    pair_prices[ticker_a],
+                    pair_prices[ticker_b],
+                    ticker_a=ticker_a,
+                    ticker_b=ticker_b,
+                    formation_fraction=formation_fraction,
+                    significance=significance,
+                    use_log_prices=use_log_prices,
+                )
+                row["oos_formation_pvalue"] = oos_result.formation_pvalue
+                row["oos_validation_pvalue"] = oos_result.validation_pvalue
+                row["oos_validated"] = oos_result.out_of_sample_validated
+            row["tradeable"] = row["tradeable"] and row["oos_validated"]
+
+        rows.append(row)
 
     results = pd.DataFrame(rows)
     if results.empty:
         return results
+
+    if not require_out_of_sample_validation:
+        results["oos_formation_pvalue"] = None
+        results["oos_validation_pvalue"] = None
+        results["oos_validated"] = None
 
     if apply_multiple_testing_correction:
         results["bh_significant"] = _benjamini_hochberg(results["adf_pvalue"], fdr_level)
