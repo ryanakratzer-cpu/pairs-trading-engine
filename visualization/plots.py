@@ -8,6 +8,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 
 OUTPUTS_DIR = Path(__file__).resolve().parent.parent / "outputs"
@@ -50,6 +51,61 @@ def plot_equity_curve(equity_curve: pd.Series, label: str = "portfolio") -> Path
     ax.set_xlabel("Date")
     fig.tight_layout()
     out_path = OUTPUTS_DIR / f"equity_curve_{label}.png"
+    fig.savefig(out_path, dpi=120)
+    plt.close(fig)
+    return out_path
+
+
+def plot_monte_carlo_paths_png(
+    historical_spread: pd.Series,
+    paths,
+    ticker_a: str,
+    ticker_b: str,
+    history_tail_days: int = 90,
+    max_paths: int = 200,
+) -> Path:
+    """Static PNG fallback of the Monte Carlo fan chart for vault/README embeds.
+
+    Subsamples to at most `max_paths` (~200) of the simulated paths: matplotlib
+    alpha-stacks hundreds of raster lines into an unreadable solid block at
+    PNG resolution, and the median/percentile overlays carry the distribution
+    anyway. The interactive HTML version keeps all paths.
+    """
+    paths = np.asarray(paths, dtype=float)
+    n_paths, n_steps = paths.shape
+    if n_paths > max_paths:
+        # Evenly spaced subsample keeps the visual spread of the fan unbiased.
+        paths_shown = paths[np.linspace(0, n_paths - 1, max_paths).astype(int)]
+    else:
+        paths_shown = paths
+
+    tail = historical_spread.iloc[-history_tail_days:]
+    if isinstance(tail.index, pd.DatetimeIndex):
+        future_x = pd.bdate_range(start=tail.index[-1], periods=n_steps)
+    else:
+        future_x = np.arange(n_steps)
+
+    fig, ax = plt.subplots(figsize=(11, 6))
+    ax.plot(tail.index, tail.to_numpy(), color="black", linewidth=1.5, label="historical spread")
+    for path in paths_shown:
+        ax.plot(future_x, path, color="tab:blue", alpha=0.05, linewidth=0.7)
+    ax.plot(future_x, np.median(paths, axis=0), color="tab:orange", linewidth=2.2, label="median path")
+    ax.fill_between(
+        future_x,
+        np.percentile(paths, 5, axis=0),
+        np.percentile(paths, 95, axis=0),
+        color="tab:blue", alpha=0.18, label="5th-95th percentile",
+    )
+    ax.set_title(
+        f"{ticker_a}/{ticker_b} spread - Monte Carlo OU simulation "
+        f"({n_paths} paths, {min(n_paths, max_paths)} shown)"
+    )
+    ax.set_xlabel("Date")
+    ax.set_ylabel("Spread")
+    ax.legend(loc="upper left", fontsize=9)
+
+    fig.tight_layout()
+    out_path = OUTPUTS_DIR / f"montecarlo_paths_{ticker_a}_{ticker_b}.png"
     fig.savefig(out_path, dpi=120)
     plt.close(fig)
     return out_path

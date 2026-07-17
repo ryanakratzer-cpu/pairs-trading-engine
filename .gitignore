@@ -3,3 +3,5 @@ __pycache__/
 .pytest_cache/
 .env
 data_cache/*.csv
+outputs/interactive_*.html
+outputs/*SYN*
