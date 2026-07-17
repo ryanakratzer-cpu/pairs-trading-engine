@@ -324,11 +324,16 @@ def plot_pnl_distribution(
     pnl_per_path: np.ndarray,
     summary: dict | None = None,
     label: str = "pair",
+    title_note: str | None = None,
 ) -> Path:
     """Histogram of simulated per-path strategy P&L with the distribution's
     key markers drawn on it - the chart's job is to show whether the P&L mass
     sits right of zero, so prob-of-profit is stated on the chart, not left to
     the reader to integrate by eye.
+
+    `title_note` is appended to the chart title only (e.g. "net of costs") -
+    it stays out of `label` because label also names the output file, and the
+    cost convention shouldn't churn the filename embeds point at.
     """
     pnl = np.asarray(pnl_per_path, dtype=float)
     if summary is None:
@@ -363,7 +368,10 @@ def plot_pnl_distribution(
         bgcolor="rgba(29, 38, 54, 0.8)", bordercolor=GRID_COLOR, borderwidth=1,
     )
 
-    _apply_theme(fig, f"Monte Carlo strategy P&L distribution — {label}", height=560)
+    title = f"Monte Carlo strategy P&L distribution — {label}"
+    if title_note:
+        title += f" ({title_note})"
+    _apply_theme(fig, title, height=560)
     fig.update_xaxes(title_text="P&L per path ($, simplified spread-change convention)")
     fig.update_yaxes(title_text="Number of paths")
     return _write(fig, f"interactive_pnl_distribution_{label}.html")

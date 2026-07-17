@@ -1,0 +1,2 @@
+ticker_a,ticker_b,as_of,hedge_ratio,is_cointegrated,adf_pvalue,half_life_days,zscore,recommendation,logged_at
+GDX,GLD,2026-07-15,1.5570980849648355,True,0.0280964971316607,11.064644973057458,-0.586154034089683,NO_POSITION,2026-07-17T03:21:50+00:00

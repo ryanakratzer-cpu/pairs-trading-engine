@@ -26,6 +26,10 @@ tests/                      pytest suite on synthetic/seeded fixtures — no net
 run_demo.py                 deterministic, no-network demo of the full pipeline
 run_screen.py                live yfinance screen -> backtest -> daily signal report
 run_pair_study.py            deep-dive on one pair: diagnostics + regime-vs-Kalman backtest
+run_montecarlo.py            1000-path OU Monte Carlo -> interactive Plotly dashboards,
+                             gross AND net-of-costs P&L distributions
+run_journal.py               forward-test journal: log today's signals, grade old entries
+                             against outcomes (outputs/signal_journal.csv, tracked in git)
 run_live_monitor.py          intraday monitor: fast-poll prices, live z-score + signal state,
                              auto-refreshing HTML dashboard (outputs/live_monitor.html)
 ```

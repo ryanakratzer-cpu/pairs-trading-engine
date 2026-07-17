@@ -6,7 +6,7 @@ import pytest
 
 from montecarlo.simulator import fit_ou, simulate_spread_paths, simulate_strategy_pnl, summarize_pnl
 from screening.cointegration import compute_half_life
-from signals.spread import SignalConfig
+from signals.spread import SignalConfig, generate_signals
 from visualization.interactive import (
     plot_interactive_equity,
     plot_interactive_spread_zscore,
@@ -87,6 +87,111 @@ def test_strategy_pnl_finite_with_summary_keys(ou_fit_and_series):
     assert result["n_paths"] == 100
     assert 0.0 <= result["prob_profit"] <= 1.0
     assert result["p05"] <= result["median"] <= result["p95"]
+
+
+@pytest.fixture
+def trading_paths_and_config(ou_fit_and_series):
+    """Simulated paths plus a deliberately loose config (entry_z=1.0) so the
+    state machine trades on essentially every path - cost tests are vacuous
+    on a fixture that never enters a position."""
+    fit, series, _ = ou_fit_and_series
+    paths = simulate_spread_paths(series, n_paths=50, horizon_days=60, seed=21, fit=fit)
+    config = SignalConfig(zscore_window=10, entry_z=1.0, exit_z=0.25, stop_z=4.0)
+    return fit, paths, config
+
+
+def _per_path_trade_stats(paths, fit, config):
+    """Round trips and holding bars per path, recomputed independently with
+    the same public pieces the simulator uses - so the cost tests check the
+    simulator's accounting against the documented convention, not against
+    its own internals."""
+    stats = []
+    for path in paths:
+        zscore = pd.Series((path - fit.mu) / fit.stationary_std)
+        positions = generate_signals(zscore, config)["position"].to_numpy()
+        held = positions[:-1] != 0
+        entered = held & ~np.concatenate(([False], held[:-1]))
+        stats.append((int(entered.sum()), int(held.sum())))
+    return stats
+
+
+def test_zero_costs_reproduce_gross_behavior(trading_paths_and_config):
+    # Backward compat: all-zero cost params must equal the pre-cost formula
+    # notional * sum(position * delta_spread) exactly, not approximately.
+    fit, paths, config = trading_paths_and_config
+    result = simulate_strategy_pnl(
+        paths, fit, config, notional=10_000.0,
+        transaction_cost_bps=0.0, slippage_bps=0.0, short_borrow_bps_annual=0.0,
+    )
+    for i, path in enumerate(paths):
+        zscore = pd.Series((path - fit.mu) / fit.stationary_std)
+        positions = generate_signals(zscore, config)["position"].to_numpy()
+        expected = 10_000.0 * float(np.sum(positions[:-1] * np.diff(path)))
+        assert result["pnl_per_path"][i] == expected
+
+
+def test_net_below_gross_when_costs_positive(trading_paths_and_config):
+    fit, paths, config = trading_paths_and_config
+    gross = simulate_strategy_pnl(
+        paths, fit, config, notional=10_000.0,
+        transaction_cost_bps=0.0, slippage_bps=0.0, short_borrow_bps_annual=0.0,
+    )
+    net = simulate_strategy_pnl(
+        paths, fit, config, notional=10_000.0,
+        transaction_cost_bps=5.0, slippage_bps=5.0, short_borrow_bps_annual=50.0,
+    )
+    stats = _per_path_trade_stats(paths, fit, config)
+    assert any(n_trades > 0 for n_trades, _ in stats)  # fixture actually trades
+
+    # Costs can only ever subtract; paths that traded must be strictly worse.
+    assert np.all(net["pnl_per_path"] <= gross["pnl_per_path"])
+    traded = np.array([n_trades > 0 for n_trades, _ in stats])
+    assert np.all(net["pnl_per_path"][traded] < gross["pnl_per_path"][traded])
+    assert net["mean"] < gross["mean"]
+
+    # Entry + exit each charge (tc + slippage) on full notional, per round trip.
+    expected_trade_costs = np.array([2.0 * (10.0 / 10_000) * 10_000.0 * n for n, _ in stats])
+    borrow = np.array([(50.0 / 10_000) * (10_000.0 / 2.0) * (bars / 252.0) for _, bars in stats])
+    np.testing.assert_allclose(
+        gross["pnl_per_path"] - net["pnl_per_path"], expected_trade_costs + borrow
+    )
+
+
+def test_borrow_cost_scales_with_holding_length(trading_paths_and_config):
+    # Isolate borrow (tc = slippage = 0): the gross-to-net gap must equal
+    # rate * (notional/2) * (bars_held/252) per path, i.e. linear in how long
+    # the position is on and nothing else.
+    fit, paths, config = trading_paths_and_config
+    gross = simulate_strategy_pnl(
+        paths, fit, config, notional=10_000.0,
+        transaction_cost_bps=0.0, slippage_bps=0.0, short_borrow_bps_annual=0.0,
+    )
+    net = simulate_strategy_pnl(
+        paths, fit, config, notional=10_000.0,
+        transaction_cost_bps=0.0, slippage_bps=0.0, short_borrow_bps_annual=100.0,
+    )
+    stats = _per_path_trade_stats(paths, fit, config)
+    bars_held = np.array([bars for _, bars in stats])
+    assert len(set(bars_held)) > 1  # holding lengths differ, so scaling is testable
+
+    deducted = gross["pnl_per_path"] - net["pnl_per_path"]
+    expected = (100.0 / 10_000) * (10_000.0 / 2.0) * (bars_held / 252.0)
+    np.testing.assert_allclose(deducted, expected)
+    # Longest-held path pays the most borrow, shortest pays the least.
+    assert deducted[np.argmax(bars_held)] == max(deducted)
+    assert deducted[np.argmin(bars_held)] == min(deducted)
+
+
+def test_net_prob_profit_not_above_gross(trading_paths_and_config):
+    # The headline number this change exists for: on identical paths, adding
+    # costs can only push P&L down, so prob-of-profit must not increase.
+    fit, paths, config = trading_paths_and_config
+    gross = simulate_strategy_pnl(
+        paths, fit, config, notional=10_000.0,
+        transaction_cost_bps=0.0, slippage_bps=0.0, short_borrow_bps_annual=0.0,
+    )
+    net = simulate_strategy_pnl(paths, fit, config, notional=10_000.0)
+    assert net["prob_profit"] <= gross["prob_profit"]
 
 
 def test_summarize_pnl_stat_values():

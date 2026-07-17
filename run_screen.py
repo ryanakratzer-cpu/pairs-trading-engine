@@ -9,6 +9,7 @@ broker: the final step is a computed signal report only.
 
 from __future__ import annotations
 
+import sys
 from datetime import datetime
 
 import pandas as pd
@@ -17,6 +18,7 @@ from backtest.metrics import compute_metrics
 from backtest.simulator import PairBacktestConfig, PairBacktester
 from data.loader import align_and_clean, fetch_price_history
 from reporting.daily_report import generate_daily_signal_report, print_report
+from reporting.journal import DEFAULT_JOURNAL_PATH, append_signals
 from screening.cointegration import screen_universe
 from screening.universe import default_universe, generate_candidate_pairs
 from signals.spread import SignalConfig
@@ -27,7 +29,7 @@ TOP_N_TO_BACKTEST = 10
 RISK_PROFILE = "conservative"  # "conservative" | "moderate" | "aggressive" — see PairBacktestConfig presets
 
 
-def main() -> None:
+def main(journal: bool = False) -> None:
     print("=== Pairs Trading Engine - live screen (yfinance, non-deterministic) ===\n")
 
     end = datetime.today().strftime("%Y-%m-%d")
@@ -109,9 +111,12 @@ def main() -> None:
         # disagree with the screen purely from a shorter default window.
         report = generate_daily_signal_report(report_pairs, lookback_days=LOOKBACK_DAYS, signal_config=SignalConfig())
         print_report(report)
+        if journal:
+            n_new = append_signals(report)
+            print(f"  [journal] {n_new} new row(s) appended to {DEFAULT_JOURNAL_PATH}")
     else:
         print("  no cointegrated pairs available for a signal report")
 
 
 if __name__ == "__main__":
-    main()
+    main(journal="--journal" in sys.argv[1:])

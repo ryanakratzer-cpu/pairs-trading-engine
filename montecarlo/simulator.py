@@ -145,6 +145,9 @@ def simulate_strategy_pnl(
     fit: OUFit,
     signal_config: SignalConfig,
     notional: float = 10_000.0,
+    transaction_cost_bps: float = 5.0,
+    slippage_bps: float = 5.0,
+    short_borrow_bps_annual: float = 50.0,
 ) -> dict:
     """Run the project's real entry/exit/stop state machine on each simulated
     path and return the resulting per-path P&L distribution.
@@ -159,10 +162,25 @@ def simulate_strategy_pnl(
     - P&L of a held position is position * delta_spread per bar, scaled by
       `notional` (spread is in log-price units, so this approximates the
       dollar P&L of a notional-sized dollar-neutral pair position). No
-      transaction costs, slippage, or per-leg share sizing.
+      per-leg share sizing.
     - A position still open at the horizon is implicitly marked at the final
       bar's value - the same END_OF_SAMPLE force-liquidation convention the
-      backtester uses.
+      backtester uses (and, like the backtester, it still pays the exit cost).
+
+    Costs (defaults match PairBacktestConfig, so the Monte Carlo headline
+    prob-of-profit is honest about the same frictions the backtest charges):
+    - Per round trip, (transaction_cost_bps + slippage_bps)/10000 * notional
+      is deducted at entry and again at exit. This mirrors the backtester's
+      _open_position/_close_position, which charge that rate on the combined
+      notional of BOTH legs at each end (entry: notional_per_leg * 2; exit:
+      the marked notional of both legs, ~= notional for a hedged pair).
+    - Short borrow: short_borrow_bps_annual/10000 * (notional/2) * (bars/252)
+      while a position is held. A dollar-neutral pair always has exactly one
+      short leg carrying notional/2, whichever direction the spread trade is,
+      so borrow accrues on half the notional for every bar in a position. The
+      backtester doesn't model borrow, so this makes the simulation slightly
+      MORE conservative than the backtest rather than less.
+    Passing zeros for all three reproduces the gross (cost-free) P&L exactly.
 
     Returns summarize_pnl()'s summary dict plus "pnl_per_path".
     """
@@ -173,6 +191,9 @@ def simulate_strategy_pnl(
             "cannot z-score simulated paths for signal generation"
         )
 
+    trade_cost_rate = (transaction_cost_bps + slippage_bps) / 10_000
+    borrow_rate = short_borrow_bps_annual / 10_000
+
     paths = np.asarray(paths, dtype=float)
     pnl_per_path = np.empty(paths.shape[0])
     for i, path in enumerate(paths):
@@ -180,6 +201,19 @@ def simulate_strategy_pnl(
         signals = generate_signals(zscore, signal_config)
         positions = signals["position"].to_numpy()
         # Position established at bar t earns the spread change over t -> t+1.
-        pnl_per_path[i] = notional * float(np.sum(positions[:-1] * np.diff(path)))
+        gross_pnl = notional * float(np.sum(positions[:-1] * np.diff(path)))
+
+        # Cost accounting uses positions[:-1] too, so trades and holding bars
+        # are counted on exactly the bars that accrue P&L: a run of nonzero
+        # position bars is one round trip, and its length is the holding
+        # period (entry bar through the bar before exit / force-liquidation).
+        held = positions[:-1] != 0
+        entered = held & ~np.concatenate(([False], held[:-1]))
+        n_round_trips = int(np.sum(entered))
+        bars_held = int(np.sum(held))
+
+        trade_costs = 2.0 * trade_cost_rate * notional * n_round_trips
+        borrow_cost = borrow_rate * (notional / 2.0) * (bars_held / 252.0)
+        pnl_per_path[i] = gross_pnl - trade_costs - borrow_cost
 
     return {"pnl_per_path": pnl_per_path, **summarize_pnl(pnl_per_path)}

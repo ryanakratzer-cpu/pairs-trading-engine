@@ -92,13 +92,22 @@ def main() -> None:
 
     print(f"\n[2/4] Simulating {N_PATHS} OU paths, {HORIZON_DAYS} business days ahead...")
     paths = simulate_spread_paths(spread, n_paths=N_PATHS, horizon_days=HORIZON_DAYS, seed=seed, fit=ou)
-    result = simulate_strategy_pnl(paths, ou, signal_config, notional=NOTIONAL)
-    print(f"  P&L per path (notional ${NOTIONAL:,.0f}, no costs - see module docstring):")
-    print(f"    mean   = {result['mean']:+,.2f}")
-    print(f"    median = {result['median']:+,.2f}")
-    print(f"    5th pct  = {result['p05']:+,.2f}")
-    print(f"    95th pct = {result['p95']:+,.2f}")
-    print(f"    prob(profit) = {result['prob_profit']:.1%}")
+    # Same paths pushed through the state machine twice: once with all costs
+    # zeroed (gross) and once with the defaults that mirror the backtester's
+    # cost convention (net). Gross stays printed for comparability with old
+    # runs, but net is the honest headline - it is what the histogram shows.
+    gross = simulate_strategy_pnl(
+        paths, ou, signal_config, notional=NOTIONAL,
+        transaction_cost_bps=0.0, slippage_bps=0.0, short_borrow_bps_annual=0.0,
+    )
+    net = simulate_strategy_pnl(paths, ou, signal_config, notional=NOTIONAL)
+    for name, result in (("gross of costs", gross), ("net of costs", net)):
+        print(f"  P&L per path, {name} (notional ${NOTIONAL:,.0f}):")
+        print(f"    mean   = {result['mean']:+,.2f}")
+        print(f"    median = {result['median']:+,.2f}")
+        print(f"    5th pct  = {result['p05']:+,.2f}")
+        print(f"    95th pct = {result['p95']:+,.2f}")
+        print(f"    prob(profit) = {result['prob_profit']:.1%}")
 
     print("\n[3/4] Backtesting pair for the equity/spread dashboards...")
     backtest_config = PairBacktestConfig(
@@ -113,7 +122,8 @@ def main() -> None:
             spread, paths, ticker_a, ticker_b, signal_config=signal_config, ou_fit=ou,
         ),
         plot_pnl_distribution(
-            result["pnl_per_path"], summary=result, label=f"{ticker_a}_{ticker_b}",
+            net["pnl_per_path"], summary=net, label=f"{ticker_a}_{ticker_b}",
+            title_note="net of costs",
         ),
         plot_interactive_equity(
             backtest["equity_curve"], backtest["trade_log"], label=f"{ticker_a}_{ticker_b}",
