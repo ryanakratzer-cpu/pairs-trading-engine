@@ -17,10 +17,11 @@ import numpy as np
 import pandas as pd
 
 from screening.cointegration import test_pair_cointegration
-from signals.spread import SignalConfig, generate_signals, rolling_zscore
+from signals.spread import KalmanHedgeRatio, SignalConfig, generate_signals, rolling_zscore
 
 DEFAULT_RECHECK_FREQ_DAYS = 60
 DEFAULT_RECHECK_WINDOW_DAYS = 252
+CLOSING_EVENTS = ("EXIT", "STOP_LOSS", "TIME_EXIT")
 
 
 @dataclass(frozen=True)
@@ -34,7 +35,16 @@ class PairBacktestConfig:
     recheck_window_days: int = DEFAULT_RECHECK_WINDOW_DAYS
     significance: float = 0.05
     use_log_prices: bool = True
+    # "regime": piecewise-constant OLS hedge ratio re-fit at each rolling
+    # re-cointegration check. "kalman": per-bar causal Kalman-filter beta
+    # (adapts continuously; the rolling recheck still gates tradeability).
+    hedge_ratio_mode: str = "regime"
+    kalman_delta: float = 1e-5
     signal_config: SignalConfig = field(default_factory=SignalConfig)
+
+    def __post_init__(self) -> None:
+        if self.hedge_ratio_mode not in ("regime", "kalman"):
+            raise ValueError('hedge_ratio_mode must be "regime" or "kalman"')
 
     @classmethod
     def conservative(cls) -> "PairBacktestConfig":
@@ -118,7 +128,18 @@ def _build_regime_hedge_ratios(
 
 
 def _prepare_pair_series(price_a: pd.Series, price_b: pd.Series, config: PairBacktestConfig) -> dict:
-    hedge_ratios, tradeable = _build_regime_hedge_ratios(price_a, price_b, config)
+    regime_hedge_ratios, tradeable = _build_regime_hedge_ratios(price_a, price_b, config)
+
+    if config.hedge_ratio_mode == "kalman":
+        # Per-bar causal beta; the regime recheck still decides tradeability,
+        # but the spread itself adapts continuously instead of jumping at each
+        # re-fit. Mask the warm-up period (before the first successful regime
+        # check) to match the regime mode's effective start.
+        kalman = KalmanHedgeRatio(delta=config.kalman_delta)
+        hedge_ratios = kalman.hedge_ratio_series(price_a, price_b, config.use_log_prices)
+        hedge_ratios = hedge_ratios.where(regime_hedge_ratios.notna())
+    else:
+        hedge_ratios = regime_hedge_ratios
 
     a = np.log(price_a) if config.use_log_prices else price_a
     b = np.log(price_b) if config.use_log_prices else price_b
@@ -175,7 +196,7 @@ class PairBacktester:
                 if date not in pair_data["signals"].index:
                     continue
                 row = pair_data["signals"].loc[date]
-                if row["event"] in ("EXIT", "STOP_LOSS"):
+                if row["event"] in CLOSING_EVENTS:
                     open_pos = open_positions.pop(pair_key)
                     price_a = pair_data["prices"].loc[date, pair_key[0]]
                     price_b = pair_data["prices"].loc[date, pair_key[1]]

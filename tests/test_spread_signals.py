@@ -1,7 +1,8 @@
+import numpy as np
 import pandas as pd
 import pytest
 
-from signals.spread import SignalConfig, generate_signals, rolling_zscore
+from signals.spread import KalmanHedgeRatio, SignalConfig, StaticOLSHedgeRatio, generate_signals, rolling_zscore
 
 
 def test_rolling_zscore_is_causal():
@@ -63,3 +64,92 @@ def test_tradeable_gate_does_not_block_exit():
 def test_signal_config_rejects_invalid_thresholds():
     with pytest.raises(ValueError):
         SignalConfig(entry_z=1.0, exit_z=2.0, stop_z=3.0)
+
+
+def test_time_exit_closes_position_that_never_converges():
+    config = SignalConfig(zscore_window=3, entry_z=2.0, exit_z=0.5, stop_z=5.0, max_holding_bars=3)
+    # Enters short at z=2.5, then z hovers between exit and stop forever —
+    # without the time exit this would HOLD indefinitely.
+    zscore = pd.Series([2.5, 2.0, 1.8, 1.9, 1.7, 1.6])
+    result = generate_signals(zscore, config)
+
+    assert result["event"].tolist() == [
+        "ENTER_SHORT_SPREAD",
+        "HOLD",
+        "HOLD",
+        "TIME_EXIT",
+        "NO_POSITION",
+        "NO_POSITION",
+    ]
+    assert result["position"].tolist() == [-1, -1, -1, 0, 0, 0]
+
+
+def test_time_exit_does_not_fire_before_limit_or_when_disabled():
+    zscore = pd.Series([2.5, 2.0, 1.8, 1.9, 1.7, 1.6])
+
+    disabled = generate_signals(zscore, SignalConfig(zscore_window=3, stop_z=5.0, max_holding_bars=None))
+    assert "TIME_EXIT" not in disabled["event"].tolist()
+
+    loose = generate_signals(zscore, SignalConfig(zscore_window=3, stop_z=5.0, max_holding_bars=10))
+    assert "TIME_EXIT" not in loose["event"].tolist()
+
+
+def test_kalman_recovers_static_beta():
+    # When the true relationship is constant, the Kalman beta should converge
+    # to the same answer as static OLS.
+    rng = np.random.default_rng(41)
+    n = 400
+    dates = pd.bdate_range("2023-01-02", periods=n)
+    log_b = np.cumsum(0.01 * rng.standard_normal(n)) + np.log(70)
+    log_a = 0.85 * log_b + 0.01 * rng.standard_normal(n)
+    price_a = pd.Series(np.exp(log_a), index=dates)
+    price_b = pd.Series(np.exp(log_b), index=dates)
+
+    kalman_beta = KalmanHedgeRatio().hedge_ratio(price_a, price_b)
+    ols_beta = StaticOLSHedgeRatio().hedge_ratio(price_a, price_b)
+
+    assert kalman_beta == pytest.approx(0.85, abs=0.05)
+    assert kalman_beta == pytest.approx(ols_beta, abs=0.05)
+
+
+def test_kalman_tracks_a_drifting_beta_where_static_ols_cannot():
+    # True beta shifts from 0.6 to 1.1 halfway through. The Kalman beta at the
+    # end should be near 1.1; static OLS over the full window lands in between
+    # and misrepresents both halves.
+    rng = np.random.default_rng(42)
+    n = 600
+    dates = pd.bdate_range("2023-01-02", periods=n)
+    log_b = np.cumsum(0.01 * rng.standard_normal(n)) + np.log(70)
+    true_beta = np.where(np.arange(n) < n // 2, 0.6, 1.1)
+    log_a = true_beta * log_b + 0.01 * rng.standard_normal(n)
+    price_a = pd.Series(np.exp(log_a), index=dates)
+    price_b = pd.Series(np.exp(log_b), index=dates)
+
+    beta_series = KalmanHedgeRatio().hedge_ratio_series(price_a, price_b)
+    ols_beta = StaticOLSHedgeRatio().hedge_ratio(price_a, price_b)
+
+    # Kalman lands near each regime's true beta (some overshoot is inherent:
+    # with a slowly-moving log price, the intercept and beta states are nearly
+    # collinear, so the filter can't pin beta exactly). Full-window OLS doesn't
+    # just land in between the two regimes — on this fixture it lands at ~-0.85,
+    # wildly wrong for BOTH, because the level shift dominates the regression.
+    assert beta_series.iloc[-1] == pytest.approx(1.1, abs=0.15)
+    assert beta_series.iloc[n // 2 - 1] == pytest.approx(0.6, abs=0.1)
+    assert abs(ols_beta - 1.1) > abs(beta_series.iloc[-1] - 1.1)  # OLS is worse at the end
+
+
+def test_kalman_beta_is_causal():
+    # The beta at bar t must not change when future bars are appended.
+    rng = np.random.default_rng(43)
+    n = 200
+    dates = pd.bdate_range("2023-01-02", periods=n)
+    log_b = np.cumsum(0.01 * rng.standard_normal(n)) + np.log(50)
+    log_a = 0.9 * log_b + 0.01 * rng.standard_normal(n)
+    price_a = pd.Series(np.exp(log_a), index=dates)
+    price_b = pd.Series(np.exp(log_b), index=dates)
+
+    kalman = KalmanHedgeRatio()
+    full = kalman.hedge_ratio_series(price_a, price_b)
+    truncated = kalman.hedge_ratio_series(price_a.iloc[:150], price_b.iloc[:150])
+
+    assert full.iloc[149] == pytest.approx(truncated.iloc[149], abs=1e-12)

@@ -6,11 +6,18 @@ from itertools import combinations
 
 SECTOR_ETFS: dict[str, list[str]] = {
     "energy": ["XLE", "XOM", "CVX", "COP", "SLB"],
-    "banks_financials": ["XLF", "JPM", "BAC", "WFC", "C", "GS", "MS"],
-    "consumer_staples": ["XLP", "KO", "PEP", "PG", "CL", "WMT", "COST"],
-    "metals_commodities": ["GLD", "SLV", "GDX"],
-    "industrials": ["XLI", "UPS", "FDX", "HD", "LOW"],
-    "payments": ["MA", "V"],
+    "refiners": ["MPC", "VLO", "PSX"],
+    "banks_financials": ["XLF", "JPM", "BAC", "WFC", "C", "GS", "MS", "SCHW"],
+    "consumer_staples": ["XLP", "KO", "PEP", "PG", "CL", "WMT", "COST", "MDLZ"],
+    "metals_commodities": ["GLD", "SLV", "GDX", "IAU"],
+    "industrials": ["XLI", "UPS", "FDX", "HD", "LOW", "CAT", "DE"],
+    "payments": ["MA", "V", "AXP"],
+    "tech_megacap": ["XLK", "AAPL", "MSFT", "GOOGL", "GOOG", "META", "ORCL"],
+    "semis": ["SMH", "NVDA", "AMD", "AVGO", "TXN", "QCOM", "AMAT", "LRCX"],
+    "healthcare": ["XLV", "JNJ", "MRK", "PFE", "ABT", "UNH", "TMO", "DHR"],
+    "utilities": ["XLU", "NEE", "DUK", "SO", "D", "AEP"],
+    "telecom": ["VZ", "T", "TMUS"],
+    "broad_index": ["SPY", "IVV", "VOO"],
 }
 
 KNOWN_PAIRS: list[tuple[str, str]] = [
@@ -23,6 +30,17 @@ KNOWN_PAIRS: list[tuple[str, str]] = [
     ("MA", "V"),
     ("HD", "LOW"),
     ("UPS", "FDX"),
+    # Structural near-twins: same underlying economics by construction, so the
+    # strongest cointegration candidates in the universe — but their spreads
+    # are also the narrowest, so the half-life filter and transaction-cost
+    # assumptions decide whether they're actually tradeable, not the ADF test.
+    ("GOOG", "GOOGL"),  # Alphabet share classes
+    ("GLD", "IAU"),     # two gold-bullion ETFs
+    ("SPY", "IVV"),     # two S&P 500 ETFs
+    ("SPY", "VOO"),
+    ("IVV", "VOO"),
+    ("AMAT", "LRCX"),   # semicap equipment duo
+    ("CAT", "DE"),      # heavy machinery duo
 ]
 
 

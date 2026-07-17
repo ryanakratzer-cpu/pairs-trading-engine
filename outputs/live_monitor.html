@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><meta http-equiv="refresh" content="15">
+<title>GDX/GLD live pair monitor</title>
+<style>
+ body { font-family: Segoe UI, sans-serif; margin: 2em; background:#1e1e2e; color:#eee; }
+ .big { font-size: 3em; font-weight: bold; color: #f39c12; }
+ table { border-collapse: collapse; margin-top: 1em; }
+ td, th { padding: 4px 12px; border-bottom: 1px solid #444; text-align: right; }
+ .meta { color: #aaa; font-size: 0.9em; }
+ svg { background:#26263a; border-radius:8px; margin-top:1em; }
+</style></head><body>
+<h1>GDX / GLD — live spread monitor</h1>
+<p style="color:#e67e22"><b>SIGNAL ONLY - research monitor. No order is ever placed by this tool.</b></p>
+<p style='color:#c0392b'><b>Market closed / data stale</b> - showing last available bar.</p>
+<div class="big">z = -0.76</div>
+<p><b>NEUTRAL - inside bands, no action</b></p>
+<p class="meta">as of 2026-07-16 15:59:00 EDT (bar age 330.3 min)
+ &nbsp;|&nbsp; GDX=71.46 &nbsp; GLD=365.01</p>
+<p class="meta">hedge ratio (OLS)=1.4760 &nbsp;|&nbsp; Kalman beta=1.1818
+ &nbsp;|&nbsp; ADF p=0.0095 &nbsp;|&nbsp; half-life=8.7d
+ &nbsp;|&nbsp; bands: entry ±2.0, exit ±0.5, stop ±3.0</p>
+<svg width="740" height="120" viewBox="0 0 740 120">
+ <line x1="0" y1="60" x2="740" y2="60" stroke="#555"/>
+ <line x1="0" y1="32.0" x2="740" y2="32.0" stroke="#c0392b" stroke-dasharray="4"/>
+ <line x1="0" y1="88.0" x2="740" y2="88.0" stroke="#c0392b" stroke-dasharray="4"/>
+ <polyline points="0,70.6 1,70.6" fill="none" stroke="#3498db" stroke-width="2" transform="scale(6,1)"/>
+</svg>
+<table><tr><th>time</th><th>GDX</th><th>GLD</th><th>spread</th><th>z</th></tr><tr><td>15:59:00</td><td>71.46</td><td>365.01</td><td>-0.02357</td><td>-0.76</td></tr><tr><td>15:59:00</td><td>71.46</td><td>365.01</td><td>-0.02357</td><td>-0.76</td></tr></table>
+</body></html>

@@ -25,6 +25,9 @@ visualization/plots.py      spread/z-score, equity curve, cointegration p-value 
 tests/                      pytest suite on synthetic/seeded fixtures — no network
 run_demo.py                 deterministic, no-network demo of the full pipeline
 run_screen.py                live yfinance screen -> backtest -> daily signal report
+run_pair_study.py            deep-dive on one pair: diagnostics + regime-vs-Kalman backtest
+run_live_monitor.py          intraday monitor: fast-poll prices, live z-score + signal state,
+                             auto-refreshing HTML dashboard (outputs/live_monitor.html)
 ```
 
 ## Setup
@@ -46,6 +49,19 @@ universe, backtests the top surviving pairs, prints today's signal report):
 
 ```
 py run_screen.py
+```
+
+Deep-dive one pair (diagnostics + regime-OLS vs Kalman hedge backtest):
+
+```
+py run_pair_study.py GDX GLD
+```
+
+Live intraday monitor (polls every ~30s, writes an auto-refreshing dashboard
+to `outputs/live_monitor.html` — open it in a browser; Ctrl+C to stop):
+
+```
+py run_live_monitor.py GDX GLD --poll 30
 ```
 
 Run the tests:
@@ -82,6 +98,26 @@ py -m pytest
   by default in `run_screen.py`, which reports both the raw count and the
   FDR-corrected count so the caveat is visible without silently gating the
   demo to zero output when nothing survives correction.
+- `KalmanHedgeRatio` (`signals/spread.py`) provides a strictly causal,
+  per-bar time-varying hedge ratio via a 2-state (intercept, beta) random-walk
+  Kalman filter; `PairBacktestConfig(hedge_ratio_mode="kalman")` uses it in
+  the backtester in place of the piecewise regime-OLS fit. Caveat learned in
+  live testing: generating signals from a *rolling z-score of the Kalman
+  spread* under-trades badly (the adaptive beta absorbs the very divergences
+  the strategy exists to trade). The canonical fix — trading the Kalman
+  *innovations* directly — is flagged as future work; for now the regime-OLS
+  mode is the recommended trading configuration and the Kalman beta serves as
+  a drift diagnostic.
+- `SignalConfig.max_holding_bars` adds a time-based exit (`TIME_EXIT`): if a
+  position hasn't converged within ~2-3x the pair's half-life, the
+  mean-reversion thesis has failed — exit rather than sit through further
+  divergence waiting for the price stop.
+- `run_live_monitor.py` fits its hedge ratio on the trailing 252 daily bars
+  (the same trailing-regime convention the backtester trades on), then polls
+  1-minute intraday bars and re-computes the live z-score each poll. Yahoo
+  intraday data can lag real-time by up to ~15 minutes depending on exchange;
+  the poll floor is 10s to avoid rate-limiting. The dashboard flags stale
+  data / market-closed explicitly.
 - `PairBacktestConfig` has three named risk-profile presets:
   `.conservative()` (smaller size per pair, fewer concurrent pairs, tighter
   stop-loss — targets ~5% max drawdown), `.moderate()` (the plain defaults),
