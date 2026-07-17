@@ -82,6 +82,12 @@ py -m pytest
   by default in `run_screen.py`, which reports both the raw count and the
   FDR-corrected count so the caveat is visible without silently gating the
   demo to zero output when nothing survives correction.
+- `PairBacktestConfig` has three named risk-profile presets:
+  `.conservative()` (smaller size per pair, fewer concurrent pairs, tighter
+  stop-loss — targets ~5% max drawdown), `.moderate()` (the plain defaults),
+  and `.aggressive()` (larger size, more concurrent pairs, looser entry/stop).
+  `run_screen.py`'s `RISK_PROFILE` constant selects which one it backtests
+  with.
 
 ## Known limitations
 

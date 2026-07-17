@@ -36,6 +36,31 @@ class PairBacktestConfig:
     use_log_prices: bool = True
     signal_config: SignalConfig = field(default_factory=SignalConfig)
 
+    @classmethod
+    def conservative(cls) -> "PairBacktestConfig":
+        """Smaller size per pair, fewer concurrent pairs, tighter stop-loss —
+        targets roughly a 5% max drawdown rather than chasing return."""
+        return cls(
+            capital_per_pair=5_000.0,
+            max_concurrent_pairs=3,
+            signal_config=SignalConfig(entry_z=2.0, exit_z=0.5, stop_z=3.0),
+        )
+
+    @classmethod
+    def moderate(cls) -> "PairBacktestConfig":
+        """The library defaults — a balance between return and drawdown."""
+        return cls()
+
+    @classmethod
+    def aggressive(cls) -> "PairBacktestConfig":
+        """Larger size per pair, more concurrent pairs, looser entry/stop —
+        accepts more volatility for more trade frequency and exposure."""
+        return cls(
+            capital_per_pair=15_000.0,
+            max_concurrent_pairs=8,
+            signal_config=SignalConfig(entry_z=1.5, exit_z=0.5, stop_z=4.5),
+        )
+
 
 @dataclass
 class _OpenPosition:

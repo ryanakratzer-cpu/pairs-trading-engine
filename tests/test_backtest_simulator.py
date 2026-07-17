@@ -6,6 +6,23 @@ from backtest.simulator import PairBacktestConfig, PairBacktester, _build_regime
 from signals.spread import SignalConfig
 
 
+def test_risk_profile_presets_are_valid_and_ordered_by_exposure():
+    conservative = PairBacktestConfig.conservative()
+    moderate = PairBacktestConfig.moderate()
+    aggressive = PairBacktestConfig.aggressive()
+
+    for config in (conservative, moderate, aggressive):
+        signal_config = config.signal_config
+        assert 0 < signal_config.exit_z < signal_config.entry_z < signal_config.stop_z
+        assert config.capital_per_pair > 0
+        assert config.max_concurrent_pairs > 0
+
+    # conservative should risk less per pair and in aggregate than aggressive
+    assert conservative.capital_per_pair <= moderate.capital_per_pair <= aggressive.capital_per_pair
+    assert conservative.max_concurrent_pairs <= moderate.max_concurrent_pairs <= aggressive.max_concurrent_pairs
+    assert conservative.signal_config.stop_z <= moderate.signal_config.stop_z <= aggressive.signal_config.stop_z
+
+
 def test_close_position_long_spread_pnl_and_costs():
     config = PairBacktestConfig(transaction_cost_bps=10.0, slippage_bps=0.0, capital_per_pair=10_000.0)
     backtester = PairBacktester(config)

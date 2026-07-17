@@ -23,7 +23,8 @@ from signals.spread import SignalConfig
 from visualization.plots import plot_cointegration_heatmap, plot_equity_curve, plot_spread_and_zscore
 
 LOOKBACK_DAYS = 900
-TOP_N_TO_BACKTEST = 5
+TOP_N_TO_BACKTEST = 10
+RISK_PROFILE = "conservative"  # "conservative" | "moderate" | "aggressive" — see PairBacktestConfig presets
 
 
 def main() -> None:
@@ -64,11 +65,11 @@ def main() -> None:
     # caveat on how much to trust them, not a gate on what gets demonstrated here.
     top_pairs = list(zip(passes_screen["ticker_a"], passes_screen["ticker_b"]))[:TOP_N_TO_BACKTEST]
 
-    print(f"\n[3/4] Backtesting top {TOP_N_TO_BACKTEST} surviving pairs")
+    print(f"\n[3/4] Backtesting top {TOP_N_TO_BACKTEST} surviving pairs ({RISK_PROFILE} risk profile)")
     if not top_pairs:
         print("  no pairs passed the screen - skipping backtest")
     else:
-        backtest_config = PairBacktestConfig(max_concurrent_pairs=min(3, len(top_pairs)))
+        backtest_config = getattr(PairBacktestConfig, RISK_PROFILE)()
         result = PairBacktester(backtest_config).run(prices, top_pairs)
         metrics = compute_metrics(result["equity_curve"], result["trade_log"])
         print(
