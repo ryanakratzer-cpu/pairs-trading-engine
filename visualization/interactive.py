@@ -22,6 +22,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 from montecarlo.simulator import OUFit, summarize_pnl
+from portfolio.optimizer import PortfolioPoint
 from signals.spread import SignalConfig
 
 OUTPUTS_DIR = Path(__file__).resolve().parent.parent / "outputs"
@@ -375,3 +376,196 @@ def plot_pnl_distribution(
     fig.update_xaxes(title_text="P&L per path ($, simplified spread-change convention)")
     fig.update_yaxes(title_text="Number of paths")
     return _write(fig, f"interactive_pnl_distribution_{label}.html")
+
+
+# Brighter grid for the frontier charts: unlike the time-series charts, the
+# whole point here is reading (vol, return) coordinates off the plane, so the
+# grid is a measurement tool rather than background texture.
+FRONTIER_GRID = "#324061"
+FRONTIER_GRID_MINOR = "#232d45"
+
+
+def _frontier_axes(fig: go.Figure) -> None:
+    """Prominent major + minor gridlines and percent ticks on both axes."""
+    axis_style = dict(
+        gridcolor=FRONTIER_GRID,
+        gridwidth=1,
+        zerolinecolor=FRONTIER_GRID,
+        tickformat=".1%",
+        minor=dict(showgrid=True, gridcolor=FRONTIER_GRID_MINOR, gridwidth=0.5),
+    )
+    fig.update_xaxes(**axis_style)
+    fig.update_yaxes(**axis_style)
+
+
+def _weights_label(weights, asset_names: list[str], top_n: int = 6) -> str:
+    """Compact 'GDX/GLD 34%, SO/XLU 22%, ...' string for hover text."""
+    order = sorted(zip(asset_names, weights), key=lambda kv: kv[1], reverse=True)
+    parts = [f"{name} {w:.0%}" for name, w in order[:top_n] if w >= 0.005]
+    return ", ".join(parts) if parts else "—"
+
+
+def plot_efficient_frontier(
+    frontier: list[PortfolioPoint],
+    cloud: list[PortfolioPoint],
+    named_points: dict[str, PortfolioPoint],
+    asset_names: list[str],
+    risk_free_rate: float = 0.0,
+    label: str = "portfolio",
+) -> Path:
+    """The risk/return plane: random-portfolio cloud colored by Sharpe ratio,
+    the efficient frontier, the capital allocation line, and the named
+    portfolios (tangency / min-variance / equal-weight) as labeled markers.
+
+    Every hover states return, volatility, Sharpe, and (for frontier and named
+    points) the underlying pair weights, so the chart answers "what would I
+    actually hold there?" — not just where the curve is.
+    """
+    fig = go.Figure()
+
+    if cloud:
+        sharpes = [p.sharpe for p in cloud]
+        fig.add_trace(
+            go.Scatter(
+                x=[p.volatility for p in cloud],
+                y=[p.expected_return for p in cloud],
+                mode="markers",
+                marker=dict(
+                    size=5,
+                    color=sharpes,
+                    colorscale="Viridis",
+                    opacity=0.55,
+                    colorbar=dict(
+                        title=dict(text="Sharpe ratio", font=dict(color=INK)),
+                        tickfont=dict(color=INK),
+                        outlinecolor=GRID_COLOR,
+                    ),
+                ),
+                name=f"{len(cloud)} random portfolios",
+                customdata=sharpes,
+                hovertemplate=(
+                    "vol %{x:.2%}, return %{y:.2%}<br>Sharpe %{customdata:.2f}"
+                    "<extra>random portfolio</extra>"
+                ),
+            )
+        )
+
+    if frontier:
+        fig.add_trace(
+            go.Scatter(
+                x=[p.volatility for p in frontier],
+                y=[p.expected_return for p in frontier],
+                mode="lines",
+                line=dict(color=MEDIAN_AMBER, width=3),
+                name="efficient frontier",
+                customdata=[[p.sharpe, _weights_label(p.weights, asset_names)] for p in frontier],
+                hovertemplate=(
+                    "vol %{x:.2%}, return %{y:.2%}<br>Sharpe %{customdata[0]:.2f}"
+                    "<br>%{customdata[1]}<extra>efficient frontier</extra>"
+                ),
+            )
+        )
+
+    # Capital allocation line: risk-free rate through the tangency portfolio —
+    # every risky/risk-free blend an investor could actually hold.
+    tangency = named_points.get("tangency (max Sharpe)")
+    if tangency is not None and tangency.volatility > 0:
+        x_end = max(
+            [p.volatility for p in frontier + list(named_points.values())] or [tangency.volatility]
+        ) * 1.1
+        fig.add_trace(
+            go.Scatter(
+                x=[0.0, x_end],
+                y=[risk_free_rate, risk_free_rate + tangency.sharpe * x_end],
+                mode="lines",
+                line=dict(color=INK_MUTED, width=1.5, dash="dash"),
+                name=f"capital allocation line (slope = Sharpe {tangency.sharpe:.2f})",
+                hovertemplate="vol %{x:.2%}, return %{y:.2%}<extra>CAL</extra>",
+            )
+        )
+
+    marker_styles = {
+        "tangency (max Sharpe)": dict(symbol="star", size=18, color=EXIT_GREEN),
+        "minimum variance": dict(symbol="diamond", size=13, color=DATA_BLUE),
+        "equal weight (1/N)": dict(symbol="circle", size=12, color=HISTORY_INK),
+    }
+    for name, point in named_points.items():
+        style = marker_styles.get(name, dict(symbol="x", size=12, color=ENTRY_ORANGE))
+        fig.add_trace(
+            go.Scatter(
+                x=[point.volatility],
+                y=[point.expected_return],
+                mode="markers+text",
+                marker=dict(**style, line=dict(width=1, color=PAPER_BG)),
+                text=[f"  {name} — Sharpe {point.sharpe:.2f}"],
+                textposition="middle right",
+                textfont=dict(size=12, color=style["color"]),
+                name=name,
+                customdata=[[point.sharpe, _weights_label(point.weights, asset_names)]],
+                hovertemplate=(
+                    "vol %{x:.2%}, return %{y:.2%}<br>Sharpe %{customdata[0]:.2f}"
+                    "<br>%{customdata[1]}<extra>" + name + "</extra>"
+                ),
+            )
+        )
+
+    # Sharpe readout panel: the three headline portfolios' numbers stated
+    # outright so nothing has to be read off the axes to compare them.
+    summary_lines = [
+        f"{name}: ret {p.expected_return:.1%}, vol {p.volatility:.1%}, <b>Sharpe {p.sharpe:.2f}</b>"
+        for name, p in named_points.items()
+    ]
+    fig.add_annotation(
+        text="<br>".join(summary_lines),
+        xref="paper", yref="paper", x=0.02, y=0.98, xanchor="left", yanchor="top",
+        showarrow=False, align="left", font=dict(size=13, color=INK),
+        bgcolor="rgba(29, 38, 54, 0.85)", bordercolor=GRID_COLOR, borderwidth=1,
+    )
+
+    _apply_theme(
+        fig,
+        f"Efficient frontier — {len(asset_names)} pair strategies ({label})",
+        height=700,
+    )
+    _frontier_axes(fig)
+    fig.update_xaxes(title_text="Volatility (annualized)", rangemode="tozero")
+    fig.update_yaxes(title_text="Expected return (annualized)")
+    return _write(fig, f"interactive_efficient_frontier_{label}.html")
+
+
+def plot_allocation_comparison(
+    equity_curves: dict[str, pd.Series],
+    sharpes: dict[str, float] | None = None,
+) -> Path:
+    """Realized equity curves of the competing allocations (tangency vs
+    min-variance vs equal-weight) overlaid on one axis, with each line's
+    realized Sharpe in its legend entry — the "did optimization actually beat
+    1/N?" chart.
+    """
+    colors = [EXIT_GREEN, DATA_BLUE, HISTORY_INK, MEDIAN_AMBER, ENTRY_ORANGE]
+    fig = go.Figure()
+    for i, (name, curve) in enumerate(equity_curves.items()):
+        legend_name = name
+        if sharpes and name in sharpes:
+            legend_name = f"{name} (Sharpe {sharpes[name]:.2f})"
+        fig.add_trace(
+            go.Scatter(
+                x=list(curve.index), y=curve.to_numpy(), mode="lines",
+                line=dict(color=colors[i % len(colors)], width=2),
+                name=legend_name,
+                hovertemplate="$%{y:,.0f}<extra>" + name + "</extra>",
+            )
+        )
+    _apply_theme(fig, "Allocation comparison — realized equity by weighting scheme")
+    fig.update_xaxes(
+        title_text="Date",
+        gridcolor=FRONTIER_GRID,
+        minor=dict(showgrid=True, gridcolor=FRONTIER_GRID_MINOR, gridwidth=0.5),
+    )
+    fig.update_yaxes(
+        title_text="Equity ($)",
+        gridcolor=FRONTIER_GRID,
+        minor=dict(showgrid=True, gridcolor=FRONTIER_GRID_MINOR, gridwidth=0.5),
+    )
+    fig.update_layout(hovermode="x unified")
+    return _write(fig, "interactive_allocation_comparison.html")

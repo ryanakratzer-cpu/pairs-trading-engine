@@ -18,6 +18,19 @@ SECTOR_ETFS: dict[str, list[str]] = {
     "utilities": ["XLU", "NEE", "DUK", "SO", "D", "AEP"],
     "telecom": ["VZ", "T", "TMUS"],
     "broad_index": ["SPY", "IVV", "VOO"],
+    # 2026-07 widening: the original 13 sectors produced only 2 out-of-sample
+    # survivors on a live screen — too few assets for portfolio allocation to
+    # matter. These groups add lower-correlation candidates (different
+    # industries, plus rates/credit ETFs whose spreads are driven by curve
+    # shape rather than equity beta).
+    "airlines": ["DAL", "UAL", "LUV", "AAL"],
+    "autos": ["F", "GM"],
+    "discount_retail": ["DG", "DLTR", "TJX", "ROST", "TGT"],
+    "insurance": ["MET", "PRU", "AIG", "ALL", "TRV"],
+    "defense": ["LMT", "NOC", "RTX", "GD"],
+    "homebuilders": ["DHI", "LEN", "PHM", "TOL"],
+    "exchanges": ["CME", "ICE", "NDAQ", "CBOE"],
+    "rates_credit": ["TLT", "IEF", "LQD", "HYG"],
 }
 
 KNOWN_PAIRS: list[tuple[str, str]] = [
@@ -41,6 +54,19 @@ KNOWN_PAIRS: list[tuple[str, str]] = [
     ("IVV", "VOO"),
     ("AMAT", "LRCX"),   # semicap equipment duo
     ("CAT", "DE"),      # heavy machinery duo
+    # Cross-sector economic-driver pairs (2026-07 widening): candidates whose
+    # shared driver is a macro factor rather than sector membership, so their
+    # spreads diversify a book of same-sector pairs.
+    ("DAL", "UAL"),     # legacy carriers
+    ("F", "GM"),        # Detroit duo
+    ("DG", "DLTR"),     # dollar stores
+    ("TJX", "ROST"),    # off-price retail
+    ("MET", "PRU"),     # life insurers
+    ("DHI", "LEN"),     # homebuilders
+    ("RTX", "NOC"),     # defense primes
+    ("CME", "ICE"),     # derivatives exchanges
+    ("TLT", "IEF"),     # long vs intermediate Treasuries (curve trade)
+    ("LQD", "HYG"),     # IG vs HY credit
 ]
 
 

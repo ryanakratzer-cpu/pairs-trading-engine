@@ -27,6 +27,10 @@ backtest/simulator.py       PairBacktester — costs/slippage, dollar-neutral si
 backtest/metrics.py         Sharpe, max drawdown, win rate, profit factor, trade stats
 montecarlo/simulator.py     OU fit + 1000-path simulation + per-path strategy P&L,
                              net of transaction costs, slippage, and short-leg borrow
+portfolio/optimizer.py      mean-variance allocation across pair strategies: OU-derived
+                             expected returns, Ledoit-Wolf shrunk covariance, efficient
+                             frontier, tangency (max Sharpe) + min-variance portfolios,
+                             long-only with a per-pair weight cap
 reporting/daily_report.py   "what would today's signal be" — pure computation, no execution
 reporting/journal.py        forward-test journal: idempotent daily signal log + outcome grader
 visualization/plots.py      static matplotlib figures (spread/z, equity, heatmap, MC fan PNG)
@@ -37,6 +41,8 @@ run_screen.py                live screen -> regime overlay -> backtest -> daily 
 run_pair_study.py            one-pair diagnostics + 3-mode backtest comparison
 run_montecarlo.py            1000-path OU Monte Carlo -> interactive dashboards, gross AND net P&L
 run_journal.py               forward-test journal runner (outputs/signal_journal.csv, git-tracked)
+run_portfolio.py             live screen -> per-pair strategy returns -> efficient frontier,
+                             tangency/min-var/equal-weight comparison + interactive frontier chart
 run_live_monitor.py          REAL-TIME monitor: Yahoo websocket streaming (default) with polling
                              fallback, live z-score + signal state, auto-refreshing dashboard
 docs/                        published interactive dashboards (GitHub Pages)
@@ -182,6 +188,23 @@ py -m pytest
   which backtests the out-of-sample survivors when there are any, and falls
   back to the raw p<0.05 pool (clearly labeled as unvalidated/exploratory)
   when there aren't, rather than silently going empty.
+
+- `portfolio/optimizer.py` treats each pair's mean-reversion strategy as an
+  asset: expected returns come from each pair's OU fit (analytic reversion
+  heuristic — (entry_z−exit_z)·σ_stationary per trade, ~4 half-lives per
+  cycle — NOT noisy historical strategy means), and the covariance is the
+  Ledoit-Wolf-shrunk covariance of per-pair backtest returns. Constraints:
+  fully invested, long-only, 40% per-pair cap. `run_portfolio.py` prints the
+  tangency/min-variance/equal-weight allocations with model AND realized
+  Sharpe ratios, and writes `interactive_efficient_frontier_live.html`
+  (random-portfolio cloud colored by Sharpe, frontier, capital allocation
+  line, minor+major gridlines) plus `interactive_allocation_comparison.html`.
+  Caveat printed by the script itself: the realized comparison is in-sample —
+  it validates the machinery, not the edge; the OU expected returns are
+  per-cycle heuristics that assume the pair is always tradeable, so they run
+  far above realized returns whenever the re-cointegration gate blocks
+  entries for long stretches. Treat model-Sharpe levels as ranking
+  information, not forecasts.
 
 ## Known limitations
 
