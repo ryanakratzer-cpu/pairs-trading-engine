@@ -1,6 +1,6 @@
 """Deep-dive study of a single pair: cointegration diagnostics, then a
-regime-OLS vs Kalman-filter hedge-ratio backtest comparison with a config
-tuned to the pair's measured half-life.
+three-way backtest comparison (regime-OLS, Kalman rolling z-score, Kalman
+innovation z-score) with a config tuned to the pair's measured half-life.
 
 Usage:  py run_pair_study.py [TICKER_A TICKER_B]   (default: GDX GLD)
 
@@ -72,7 +72,7 @@ def main() -> None:
 
     print(f"\n[2/3] Backtest comparison (config tuned to half-life ~{half_life:.0f}d)")
     comparison_rows = []
-    for mode in ("regime", "kalman"):
+    for mode in ("regime", "kalman", "kalman_innovation"):
         config = tuned_config(half_life, mode)
         result = PairBacktester(config).run(pair_prices, [(ticker_a, ticker_b)])
         metrics = compute_metrics(result["equity_curve"], result["trade_log"])

@@ -76,10 +76,18 @@ class KalmanHedgeRatio(HedgeRatioModel):
         """Latest (most recent) beta — the interface's single-float contract."""
         return float(self.hedge_ratio_series(price_a, price_b, use_log_prices).iloc[-1])
 
-    def hedge_ratio_series(
-        self, price_a: pd.Series, price_b: pd.Series, use_log_prices: bool = True
-    ) -> pd.Series:
-        """Full causal beta path, one value per bar, aligned to price_a's index."""
+    def _run_filter(
+        self, price_a: pd.Series, price_b: pd.Series, use_log_prices: bool
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Single forward pass of the filter, returning per-bar arrays of
+        (post-update beta, innovation, predicted innovation variance).
+
+        Both public series methods wrap this so the filter math lives in exactly
+        one place. The innovation and its variance are captured BEFORE the bar's
+        state update — they measure the surprise in a_t relative to what the
+        filter predicted from information through t-1, which is what makes the
+        innovation z-score strictly causal.
+        """
         a = (np.log(price_a) if use_log_prices else price_a).astype(float).to_numpy()
         b = (np.log(price_b) if use_log_prices else price_b).astype(float).to_numpy()
         n = len(a)
@@ -89,21 +97,68 @@ class KalmanHedgeRatio(HedgeRatioModel):
         transition_cov = (self.delta / (1 - self.delta)) * np.eye(2)
 
         betas = np.empty(n)
+        innovations = np.empty(n)
+        innovation_vars = np.empty(n)
         for t in range(n):
             # Predict: random-walk state, covariance grows by transition noise
             state_cov = state_cov + transition_cov
 
-            # Update with observation a_t = H @ state + noise, H = [1, b_t]
+            # Innovation: a_t minus its one-step-ahead prediction (pre-update state)
             obs_vector = np.array([1.0, b[t]])
             innovation = a[t] - obs_vector @ state
             innovation_var = obs_vector @ state_cov @ obs_vector + self.observation_variance
+
+            # Update with observation a_t = H @ state + noise, H = [1, b_t]
             kalman_gain = state_cov @ obs_vector / innovation_var
             state = state + kalman_gain * innovation
             state_cov = state_cov - np.outer(kalman_gain, obs_vector) @ state_cov
 
             betas[t] = state[1]
+            innovations[t] = innovation
+            innovation_vars[t] = innovation_var
 
+        return betas, innovations, innovation_vars
+
+    def hedge_ratio_series(
+        self, price_a: pd.Series, price_b: pd.Series, use_log_prices: bool = True
+    ) -> pd.Series:
+        """Full causal beta path, one value per bar, aligned to price_a's index."""
+        betas, _, _ = self._run_filter(price_a, price_b, use_log_prices)
         return pd.Series(betas, index=price_a.index, name="kalman_beta")
+
+    def innovation_series(
+        self,
+        price_a: pd.Series,
+        price_b: pd.Series,
+        use_log_prices: bool = True,
+        warmup_bars: int = 30,
+    ) -> pd.DataFrame:
+        """Per-bar filter innovations with their standardized z-score.
+
+        The innovation e_t = a_t - predicted_a_t is the filter's one-step-ahead
+        surprise, and Q_t (its predicted variance) standardizes it into
+        z_t = e_t / sqrt(Q_t). This is the canonical fix (Chan) for the
+        under-trading of a rolling z-score built on the Kalman spread: the
+        adaptive beta absorbs divergences into the state, so the spread looks
+        mean-reverted even mid-divergence, while the innovation measures exactly
+        the part of a_t the filter could NOT explain and is self-normalizing
+        with no rolling window. The first `warmup_bars` z-scores are set to NaN
+        because under the diffuse prior the early predictions are dominated by
+        state uncertainty — those transients would otherwise fire bogus signals.
+
+        Returns a DataFrame aligned to price_a's index with columns
+        `innovation`, `innovation_std` (sqrt of predicted innovation variance),
+        and `zscore` (their ratio).
+        """
+        _, innovations, innovation_vars = self._run_filter(price_a, price_b, use_log_prices)
+        innovation_std = np.sqrt(innovation_vars)
+        zscore = innovations / innovation_std
+        if warmup_bars > 0:
+            zscore[: min(warmup_bars, len(zscore))] = np.nan
+        return pd.DataFrame(
+            {"innovation": innovations, "innovation_std": innovation_std, "zscore": zscore},
+            index=price_a.index,
+        )
 
     def spread_series(
         self, price_a: pd.Series, price_b: pd.Series, use_log_prices: bool = True

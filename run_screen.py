@@ -12,6 +12,7 @@ from __future__ import annotations
 import sys
 from datetime import datetime
 
+import numpy as np
 import pandas as pd
 
 from backtest.metrics import compute_metrics
@@ -20,6 +21,13 @@ from data.loader import align_and_clean, fetch_price_history
 from reporting.daily_report import generate_daily_signal_report, print_report
 from reporting.journal import DEFAULT_JOURNAL_PATH, append_signals
 from screening.cointegration import screen_universe
+from screening.regime import (
+    RegimeConfig,
+    compute_stress_mask,
+    fetch_macro_panel,
+    macro_spread_diagnostics,
+    stress_percentile_ranks,
+)
 from screening.universe import default_universe, generate_candidate_pairs
 from signals.spread import SignalConfig
 from visualization.plots import plot_cointegration_heatmap, plot_equity_curve, plot_spread_and_zscore
@@ -68,6 +76,41 @@ def main(journal: bool = False) -> None:
     print(results.head(15).to_string(index=False))
     heatmap_path = plot_cointegration_heatmap(results.head(20), title="live_cointegration_pvalues")
     print(f"  saved {heatmap_path}")
+
+    # Informational only for now: the regime mask is NOT gating the screen or
+    # the backtest below. Wiring it into the backtester is a separate step.
+    print("\n[macro] Regime overlay (informational, not gating anything yet)")
+    try:
+        macro_panel = fetch_macro_panel(start, end)
+        regime_config = RegimeConfig()
+        mask = compute_stress_mask(macro_panel, regime_config)
+        ranks = stress_percentile_ranks(macro_panel, regime_config)
+        latest_ranks = ranks.ffill().iloc[-1]
+
+        regime_label = "CALM (entries allowed)" if bool(mask.iloc[-1]) else "STRESSED (entries would be blocked)"
+        thresholds = {
+            "vix": regime_config.vix_stress_percentile,
+            "gold_vol": regime_config.gold_vol_stress_percentile,
+        }
+        detail = "; ".join(
+            f"{name} pct rank {latest_ranks[name]:.2f} vs {thresholds[name]:.2f} stress threshold"
+            for name in latest_ranks.index
+        )
+        n_stressed = int((~mask).sum())
+        print(f"  current regime: {regime_label} [{detail}]")
+        print(f"  {n_stressed}/{len(mask)} days in the lookback flagged stressed")
+
+        if len(results) > 0:
+            top = results.iloc[0]
+            ticker_a, ticker_b = top["ticker_a"], top["ticker_b"]
+            # Log spread up to a constant; the intercept drops out of the daily
+            # changes the diagnostics correlate.
+            spread = np.log(prices[ticker_a]) - top["hedge_ratio"] * np.log(prices[ticker_b])
+            diagnostics = macro_spread_diagnostics(spread, macro_panel)
+            print(f"  spread-vs-macro coupling for top pair {ticker_a}/{ticker_b} (correlation, not causation):")
+            print(diagnostics.to_string(index=False))
+    except Exception as exc:  # macro fetch failure must never break the screen
+        print(f"  WARNING: macro regime step skipped ({exc})")
 
     # Backtest/report on the out-of-sample survivors when there are any — this is
     # the strongest available filter, since it directly tests whether the fitted

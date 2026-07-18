@@ -153,3 +153,52 @@ def test_kalman_beta_is_causal():
     truncated = kalman.hedge_ratio_series(price_a.iloc[:150], price_b.iloc[:150])
 
     assert full.iloc[149] == pytest.approx(truncated.iloc[149], abs=1e-12)
+
+
+def test_innovation_series_is_causal(cointegrated_pair_prices):
+    # The innovation at bar t is the surprise relative to the PRE-update state,
+    # so appending future bars must leave every past value (innovation, its
+    # predicted std, and the z-score) exactly unchanged.
+    price_a, price_b, _hedge_ratio_true, _theta = cointegrated_pair_prices
+
+    kalman = KalmanHedgeRatio()
+    full = kalman.innovation_series(price_a, price_b)
+    truncated = kalman.innovation_series(price_a.iloc[:300], price_b.iloc[:300])
+
+    pd.testing.assert_frame_equal(full.iloc[:300], truncated)
+
+
+def test_innovation_warmup_zscores_are_nan(cointegrated_pair_prices):
+    # Under the diffuse prior the first predictions are dominated by state
+    # uncertainty; those transient z-scores must be masked or they fire
+    # bogus signals. Innovations themselves stay populated for diagnostics.
+    price_a, price_b, _hedge_ratio_true, _theta = cointegrated_pair_prices
+    kalman = KalmanHedgeRatio()
+
+    default = kalman.innovation_series(price_a, price_b)
+    assert default["zscore"].iloc[:30].isna().all()
+    assert default["zscore"].iloc[30:].notna().all()
+    assert default["innovation"].notna().all()
+    assert default["innovation_std"].notna().all()
+
+    custom = kalman.innovation_series(price_a, price_b, warmup_bars=10)
+    assert custom["zscore"].iloc[:10].isna().all()
+    assert custom["zscore"].iloc[10:].notna().all()
+
+
+def test_innovation_zscore_trades_the_cointegrated_fixture(cointegrated_pair_prices):
+    # THE regression test for the documented under-trading problem: a rolling
+    # z-score of the Kalman spread barely trades because the adaptive state
+    # absorbs divergences. The standardized innovation keeps them, so with
+    # default SignalConfig thresholds it must produce real entries. The filter
+    # R is set to the fixture's known observation variance (OU sigma=0.02,
+    # so R=4e-4); the class default 1e-3 assumes noisier data than this
+    # fixture has, which deflates every z below the 2.0 entry threshold.
+    price_a, price_b, _hedge_ratio_true, _theta = cointegrated_pair_prices
+
+    kalman = KalmanHedgeRatio(observation_variance=4e-4)
+    zscore = kalman.innovation_series(price_a, price_b)["zscore"]
+    signals = generate_signals(zscore, SignalConfig())
+
+    entries = signals["event"].isin(["ENTER_LONG_SPREAD", "ENTER_SHORT_SPREAD"]).sum()
+    assert entries >= 1

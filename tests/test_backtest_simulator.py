@@ -115,6 +115,15 @@ def test_open_position_still_open_at_data_end_is_force_liquidated(cointegrated_p
     assert final_equity == pytest.approx(config.initial_capital + total_pnl)
 
 
+def test_config_rejects_unknown_hedge_ratio_mode():
+    with pytest.raises(ValueError):
+        PairBacktestConfig(hedge_ratio_mode="ols")
+
+    # All three supported modes must validate.
+    for mode in ("regime", "kalman", "kalman_innovation"):
+        assert PairBacktestConfig(hedge_ratio_mode=mode).hedge_ratio_mode == mode
+
+
 def test_regime_hedge_ratio_disables_after_cointegration_breaks_down():
     dates = pd.bdate_range("2023-01-02", periods=400)
     n = len(dates)
@@ -174,6 +183,38 @@ def test_end_to_end_backtest_smoke(sector_universe_fixture):
 
     assert len(result["equity_curve"]) == len(panel)
     assert not result["trade_log"].empty
+
+    final_equity = result["equity_curve"].iloc[-1]
+    total_pnl = result["trade_log"]["pnl"].sum()
+    assert final_equity == pytest.approx(config.initial_capital + total_pnl)
+
+
+def test_kalman_innovation_mode_backtests_end_to_end(sector_universe_fixture):
+    # The innovation z-score must flow through the whole simulator: signal
+    # generation, regime-gated entries, and P&L accounting. Same recheck and
+    # threshold settings as the other end-to-end tests so trade frequency is
+    # comparable across modes.
+    panel, (ticker_a, ticker_b) = sector_universe_fixture
+    pairs = [(ticker_a, ticker_b), ("CCC", "DDD")]
+
+    config = PairBacktestConfig(
+        recheck_window_days=100,
+        recheck_freq_days=50,
+        hedge_ratio_mode="kalman_innovation",
+        signal_config=SignalConfig(zscore_window=15, entry_z=1.0, exit_z=0.3, stop_z=4.0),
+        max_concurrent_pairs=2,
+    )
+    result = PairBacktester(config).run(panel, pairs)
+
+    assert len(result["equity_curve"]) == len(panel)
+    assert not result["trade_log"].empty  # at least one trade executed
+
+    # The spread/zscore series exposed for plots must be the innovation series,
+    # not a rolling z-score: after warmup they are fully populated (no rolling
+    # window of NaNs) and the zscore is spread / predicted std at every bar.
+    pair_data = result["per_pair"][(ticker_a, ticker_b)]
+    assert pair_data["zscore"].iloc[:30].isna().all()
+    assert pair_data["spread"].notna().all()
 
     final_equity = result["equity_curve"].iloc[-1]
     total_pnl = result["trade_log"]["pnl"].sum()

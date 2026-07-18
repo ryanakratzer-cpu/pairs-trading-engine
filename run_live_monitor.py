@@ -1,21 +1,42 @@
-"""Live intraday pair monitor: polls prices, updates the spread z-score and
-signal state in near-real-time, and renders an auto-refreshing HTML dashboard.
+"""Live intraday pair monitor: streams real-time prices over Yahoo's websocket
+(with automatic fallback to polling), updates the spread z-score and signal
+state in near-real-time, and renders an auto-refreshing HTML dashboard.
 
 Usage:
-    py run_live_monitor.py [TICKER_A TICKER_B] [--poll SECONDS] [--max-polls N]
-    (defaults: GDX GLD, 30-second polls, unlimited)
+    py run_live_monitor.py [TICKER_A TICKER_B] [--mode stream|poll]
+                           [--min-update-interval SECONDS]
+                           [--poll SECONDS] [--max-polls N]
+    (defaults: GDX GLD, stream mode, 2s min recompute interval, 30s polls)
 
-Open outputs/live_monitor.html in a browser — it refreshes itself every 15s.
+Modes:
+    stream (default) - subscribes to both tickers on the yfinance websocket
+        (yf.WebSocket). Every tick updates that ticker's latest price; once
+        both tickers have a price, the spread/z-score is recomputed at most
+        every --min-update-interval seconds. If the websocket fails to connect
+        within ~15s, or errors/disconnects later, the monitor logs it and
+        falls back to polling automatically. After 60s with no ticks (market
+        closed), it renders the dashboard from the last daily close and keeps
+        listening (no polling hammering).
+    poll - the original loop: fetch the latest 1-minute bar every --poll
+        seconds.
+
+--max-polls semantics: in poll mode, N polls as before. In stream mode, the
+run ends after N dashboard updates OR after N*60 seconds of wall time,
+whichever comes first (so short test runs terminate even off-hours).
+
+Open outputs/live_monitor.html in a browser - it refreshes itself every 5s in
+stream mode, 15s in poll mode.
 
 Honest data caveats: Yahoo intraday quotes can lag real-time by up to ~15
 minutes depending on the exchange, and polling much faster than ~15-30s risks
-rate-limiting. This is a monitoring/research tool: SIGNAL ONLY — it never
+rate-limiting. This is a monitoring/research tool: SIGNAL ONLY - it never
 places an order and has no broker connectivity.
 """
 
 from __future__ import annotations
 
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -31,7 +52,11 @@ from signals.spread import KalmanHedgeRatio, SignalConfig
 OUTPUTS_DIR = Path(__file__).resolve().parent / "outputs"
 DAILY_LOOKBACK_DAYS = 900
 DEFAULT_POLL_SECONDS = 30
+DEFAULT_MIN_UPDATE_INTERVAL = 2.0
 STALE_AFTER_MINUTES = 20  # intraday bar older than this => treat market as closed/stale
+STREAM_CONNECT_TIMEOUT = 15.0  # seconds to wait for the websocket before falling back
+STREAM_QUIET_SECONDS = 60.0  # no ticks for this long => market-closed note
+STREAM_MAX_SECONDS_PER_UPDATE = 60.0  # stream --max-polls N also caps wall time at N * this
 DISCLAIMER = "SIGNAL ONLY - research monitor. No order is ever placed by this tool."
 
 
@@ -67,6 +92,19 @@ def build_daily_context(ticker_a: str, ticker_b: str, signal_config: SignalConfi
         "daily_spread_tail": daily_spread.iloc[-90:],
         "last_daily_close": pair.iloc[-1].to_dict(),
     }
+
+
+def compute_spread_point(price_a: float, price_b: float, context: dict) -> tuple[float, float]:
+    """Pure math: (spread, zscore) for one pair of prices given the daily context.
+
+    spread = ln(a) - hedge_ratio * ln(b) - intercept
+    z      = (spread - spread_mean) / spread_std
+    """
+    spread = float(
+        np.log(price_a) - context["hedge_ratio"] * np.log(price_b) - context["intercept"]
+    )
+    z = (spread - context["spread_mean"]) / context["spread_std"]
+    return spread, z
 
 
 def fetch_latest_intraday(ticker_a: str, ticker_b: str) -> dict | None:
@@ -107,8 +145,43 @@ def classify(z: float, config: SignalConfig) -> str:
     return "NEUTRAL - inside bands, no action"
 
 
-def render_html(ticker_a: str, ticker_b: str, context: dict, history: pd.DataFrame, config: SignalConfig) -> None:
-    """Self-contained dashboard, refreshes itself every 15s via meta tag."""
+def decide_stream_action(
+    connected: bool,
+    thread_alive: bool,
+    seconds_since_last_event: float,
+    connect_timeout: float = STREAM_CONNECT_TIMEOUT,
+    quiet_seconds: float = STREAM_QUIET_SECONDS,
+) -> str:
+    """Pure fallback/quiet decision for the stream loop.
+
+    Returns one of:
+      'wait'     - not connected yet, still within the connect timeout
+      'fallback' - websocket failed (never connected in time, or died) => poll
+      'quiet'    - connected but no ticks for `quiet_seconds` (market closed)
+      'ok'       - connected and ticking normally
+    """
+    if not connected:
+        if not thread_alive or seconds_since_last_event >= connect_timeout:
+            return "fallback"
+        return "wait"
+    if not thread_alive:
+        return "fallback"
+    if seconds_since_last_event >= quiet_seconds:
+        return "quiet"
+    return "ok"
+
+
+def render_html(
+    ticker_a: str,
+    ticker_b: str,
+    context: dict,
+    history: pd.DataFrame,
+    config: SignalConfig,
+    mode: str = "poll",
+) -> None:
+    """Self-contained dashboard; refreshes itself via meta tag (5s stream, 15s poll)."""
+    refresh_seconds = 5 if mode == "stream" else 15
+    mode_badge = "STREAMING (Yahoo websocket)" if mode == "stream" else "POLLING"
     latest = history.iloc[-1]
     z = latest["zscore"]
     status_color = "#c0392b" if abs(z) >= config.entry_z else ("#27ae60" if abs(z) <= config.exit_z else "#f39c12")
@@ -127,7 +200,7 @@ def render_html(ticker_a: str, ticker_b: str, context: dict, history: pd.DataFra
         if latest["is_stale"] else ""
     )
     html = f"""<!DOCTYPE html>
-<html><head><meta charset="utf-8"><meta http-equiv="refresh" content="15">
+<html><head><meta charset="utf-8"><meta http-equiv="refresh" content="{refresh_seconds}">
 <title>{ticker_a}/{ticker_b} live pair monitor</title>
 <style>
  body {{ font-family: Segoe UI, sans-serif; margin: 2em; background:#1e1e2e; color:#eee; }}
@@ -135,10 +208,12 @@ def render_html(ticker_a: str, ticker_b: str, context: dict, history: pd.DataFra
  table {{ border-collapse: collapse; margin-top: 1em; }}
  td, th {{ padding: 4px 12px; border-bottom: 1px solid #444; text-align: right; }}
  .meta {{ color: #aaa; font-size: 0.9em; }}
+ .mode {{ color: #3498db; font-weight: bold; font-size: 0.9em; letter-spacing: 1px; }}
  svg {{ background:#26263a; border-radius:8px; margin-top:1em; }}
 </style></head><body>
 <h1>{ticker_a} / {ticker_b} — live spread monitor</h1>
 <p style="color:#e67e22"><b>{DISCLAIMER}</b></p>
+<p class="mode">MODE: {mode_badge} &nbsp;|&nbsp; page refreshes every {refresh_seconds}s</p>
 {stale_note}
 <div class="big">z = {z:+.2f}</div>
 <p><b>{classify(z, config)}</b></p>
@@ -159,29 +234,145 @@ def render_html(ticker_a: str, ticker_b: str, context: dict, history: pd.DataFra
     (OUTPUTS_DIR / "live_monitor.html").write_text(html, encoding="utf-8")
 
 
-def main() -> None:
-    args = [a for a in sys.argv[1:] if not a.startswith("--")]
-    ticker_a, ticker_b = (args[0], args[1]) if len(args) >= 2 else ("GDX", "GLD")
-    poll_seconds = DEFAULT_POLL_SECONDS
-    max_polls = None
-    for i, arg in enumerate(sys.argv):
-        if arg == "--poll" and i + 1 < len(sys.argv):
-            poll_seconds = max(int(sys.argv[i + 1]), 10)  # floor to avoid hammering the source
-        if arg == "--max-polls" and i + 1 < len(sys.argv):
-            max_polls = int(sys.argv[i + 1])
+class _StreamState:
+    """Shared state between the websocket listener thread and the main loop."""
 
-    config = SignalConfig(zscore_window=50, entry_z=2.0, exit_z=0.5, stop_z=3.0, max_holding_bars=62)
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.prices: dict[str, float] = {}
+        self.last_tick_monotonic: float | None = None
+        self.connected = threading.Event()
+        self.dead = threading.Event()
+        self.error: str | None = None
 
-    print(f"=== Live pair monitor: {ticker_a}/{ticker_b}, polling every {poll_seconds}s ===")
-    print(DISCLAIMER)
-    print("Building daily context (hedge ratio, z-score baseline)...")
-    context = build_daily_context(ticker_a, ticker_b, config)
-    half_life = context["half_life_days"]
-    print(
-        f"  hedge_ratio={context['hedge_ratio']:.4f}, kalman_beta={context['kalman_beta']:.4f}, "
-        f"adf_p={context['adf_pvalue']:.4f}, half_life={half_life if half_life is None else round(half_life, 1)}d"
-    )
 
+def _stream_worker(tickers: list[str], state: _StreamState) -> None:
+    """Background thread: subscribe and pump websocket ticks into `state`."""
+    wanted = set(tickers)
+
+    def handler(message: dict) -> None:
+        symbol = message.get("id")
+        price = message.get("price")
+        if symbol in wanted and price is not None:
+            with state.lock:
+                state.prices[symbol] = float(price)
+                state.last_tick_monotonic = time.monotonic()
+
+    try:
+        ws = yf.WebSocket(verbose=False)
+        ws.subscribe(list(tickers))  # connects; raises if the socket can't open
+        state.connected.set()
+        ws.listen(handler)  # blocks; returns on error/disconnect
+    except Exception as exc:  # noqa: BLE001 - any websocket failure => fallback signal
+        state.error = str(exc)
+    finally:
+        state.dead.set()
+
+
+def run_stream_loop(
+    ticker_a: str,
+    ticker_b: str,
+    context: dict,
+    config: SignalConfig,
+    min_update_interval: float,
+    max_polls: int | None,
+) -> bool:
+    """Websocket streaming loop. Returns True if it ran to completion,
+    False if the websocket failed and the caller should fall back to polling."""
+    state = _StreamState()
+    thread = threading.Thread(target=_stream_worker, args=([ticker_a, ticker_b], state), daemon=True)
+    thread.start()
+
+    if not state.connected.wait(timeout=STREAM_CONNECT_TIMEOUT):
+        detail = state.error or "timed out"
+        print(f"  websocket did not connect within {STREAM_CONNECT_TIMEOUT:.0f}s ({detail})")
+        return False
+    print(f"  websocket connected; subscribed to {ticker_a}, {ticker_b}")
+
+    history_rows: list[dict] = []
+    history_index: list[pd.Timestamp] = []
+    updates = 0
+    start = time.monotonic()
+    last_recompute = 0.0
+    last_processed_tick = 0.0
+    quiet_noted = False
+
+    while True:
+        if max_polls is not None and (
+            updates >= max_polls or (time.monotonic() - start) >= max_polls * STREAM_MAX_SECONDS_PER_UPDATE
+        ):
+            break
+
+        now = time.monotonic()
+        with state.lock:
+            prices = dict(state.prices)
+            last_tick = state.last_tick_monotonic
+        seconds_since_event = now - (last_tick if last_tick is not None else start)
+
+        action = decide_stream_action(True, not state.dead.is_set(), seconds_since_event)
+        if action == "fallback":
+            detail = state.error or "connection closed"
+            print(f"  [{datetime.now():%H:%M:%S}] websocket disconnected ({detail})")
+            return False
+
+        have_both = ticker_a in prices and ticker_b in prices
+        fresh_tick = last_tick is not None and last_tick > last_processed_tick
+
+        if have_both and fresh_tick and (now - last_recompute) >= min_update_interval:
+            spread, z = compute_spread_point(prices[ticker_a], prices[ticker_b], context)
+            history_rows.append(
+                {
+                    "price_a": prices[ticker_a], "price_b": prices[ticker_b],
+                    "spread": spread, "zscore": z,
+                    "age_minutes": seconds_since_event / 60, "is_stale": False,
+                }
+            )
+            history_index.append(pd.Timestamp(datetime.now(timezone.utc)))
+            history = pd.DataFrame(history_rows, index=pd.DatetimeIndex(history_index))
+            render_html(ticker_a, ticker_b, context, history, config, mode="stream")
+            print(
+                f"  [{datetime.now():%H:%M:%S}] {ticker_a}={prices[ticker_a]:.2f} "
+                f"{ticker_b}={prices[ticker_b]:.2f} z={z:+.2f} [STREAM] -> {classify(z, config)}"
+            )
+            last_recompute = now
+            last_processed_tick = last_tick
+            updates += 1
+            quiet_noted = False
+        elif action == "quiet" and not quiet_noted:
+            print(
+                f"  [{datetime.now():%H:%M:%S}] no ticks for {STREAM_QUIET_SECONDS:.0f}s - "
+                "market likely closed; showing last daily close, still listening"
+            )
+            close = context["last_daily_close"]
+            spread, z = compute_spread_point(close[ticker_a], close[ticker_b], context)
+            history_rows.append(
+                {
+                    "price_a": float(close[ticker_a]), "price_b": float(close[ticker_b]),
+                    "spread": spread, "zscore": z,
+                    "age_minutes": seconds_since_event / 60, "is_stale": True,
+                }
+            )
+            history_index.append(pd.Timestamp(datetime.now(timezone.utc)))
+            history = pd.DataFrame(history_rows, index=pd.DatetimeIndex(history_index))
+            render_html(ticker_a, ticker_b, context, history, config, mode="stream")
+            print(f"  [{datetime.now():%H:%M:%S}] z={z:+.2f} [STALE/CLOSED] -> {classify(z, config)}")
+            updates += 1
+            quiet_noted = True
+
+        time.sleep(0.25)
+
+    return True
+
+
+def run_poll_loop(
+    ticker_a: str,
+    ticker_b: str,
+    context: dict,
+    config: SignalConfig,
+    poll_seconds: int,
+    max_polls: int | None,
+) -> None:
+    """Original polling loop: latest 1-minute bar every `poll_seconds`."""
     history_rows, history_index = [], []
     polls = 0
     while max_polls is None or polls < max_polls:
@@ -198,10 +389,7 @@ def main() -> None:
             time.sleep(poll_seconds)
             continue
 
-        spread = (
-            np.log(tick["price_a"]) - context["hedge_ratio"] * np.log(tick["price_b"]) - context["intercept"]
-        )
-        z = (spread - context["spread_mean"]) / context["spread_std"]
+        spread, z = compute_spread_point(tick["price_a"], tick["price_b"], context)
         history_rows.append(
             {
                 "price_a": tick["price_a"], "price_b": tick["price_b"],
@@ -211,7 +399,7 @@ def main() -> None:
         )
         history_index.append(tick["bar_time"])
         history = pd.DataFrame(history_rows, index=pd.DatetimeIndex(history_index))
-        render_html(ticker_a, ticker_b, context, history, config)
+        render_html(ticker_a, ticker_b, context, history, config, mode="poll")
 
         stale_flag = " [STALE/CLOSED]" if tick["is_stale"] else ""
         print(
@@ -224,7 +412,55 @@ def main() -> None:
         # Poll gently when the market is closed - nothing changes anyway.
         time.sleep(poll_seconds * (4 if tick["is_stale"] else 1))
 
-    print(f"\nDashboard: {OUTPUTS_DIR / 'live_monitor.html'} (auto-refreshes every 15s while this runs)")
+
+def main() -> None:
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    ticker_a, ticker_b = (args[0], args[1]) if len(args) >= 2 else ("GDX", "GLD")
+    poll_seconds = DEFAULT_POLL_SECONDS
+    min_update_interval = DEFAULT_MIN_UPDATE_INTERVAL
+    mode = "stream"
+    max_polls = None
+    for i, arg in enumerate(sys.argv):
+        if arg == "--poll" and i + 1 < len(sys.argv):
+            poll_seconds = max(int(sys.argv[i + 1]), 10)  # floor to avoid hammering the source
+        if arg == "--max-polls" and i + 1 < len(sys.argv):
+            max_polls = int(sys.argv[i + 1])
+        if arg == "--mode" and i + 1 < len(sys.argv):
+            mode = sys.argv[i + 1].lower()
+        if arg == "--min-update-interval" and i + 1 < len(sys.argv):
+            min_update_interval = max(float(sys.argv[i + 1]), 0.5)  # floor to avoid render spam
+    if mode not in ("stream", "poll"):
+        print(f"Unknown --mode '{mode}'; expected stream or poll")
+        sys.exit(2)
+
+    config = SignalConfig(zscore_window=50, entry_z=2.0, exit_z=0.5, stop_z=3.0, max_holding_bars=62)
+
+    mode_desc = (
+        f"streaming (websocket, recompute every >={min_update_interval:g}s)"
+        if mode == "stream" else f"polling every {poll_seconds}s"
+    )
+    print(f"=== Live pair monitor: {ticker_a}/{ticker_b}, {mode_desc} ===")
+    print(DISCLAIMER)
+    print("Building daily context (hedge ratio, z-score baseline)...")
+    context = build_daily_context(ticker_a, ticker_b, config)
+    half_life = context["half_life_days"]
+    print(
+        f"  hedge_ratio={context['hedge_ratio']:.4f}, kalman_beta={context['kalman_beta']:.4f}, "
+        f"adf_p={context['adf_pvalue']:.4f}, half_life={half_life if half_life is None else round(half_life, 1)}d"
+    )
+
+    if mode == "stream":
+        completed = run_stream_loop(ticker_a, ticker_b, context, config, min_update_interval, max_polls)
+        if not completed:
+            print("  falling back to polling mode")
+            mode = "poll"  # so the dashboard note below reports the refresh actually in effect
+            run_poll_loop(ticker_a, ticker_b, context, config, poll_seconds, max_polls)
+    else:
+        run_poll_loop(ticker_a, ticker_b, context, config, poll_seconds, max_polls)
+
+    refresh = 5 if mode == "stream" else 15
+    print(f"\nDashboard: {OUTPUTS_DIR / 'live_monitor.html'} (auto-refreshes every {refresh}s while this runs)")
+    print(DISCLAIMER)
 
 
 if __name__ == "__main__":

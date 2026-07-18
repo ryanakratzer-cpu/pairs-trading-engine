@@ -12,26 +12,34 @@ places an order or talks to a broker.**
 
 ```
 data/loader.py              yfinance fetch (auto_adjust close) + local CSV cache in data_cache/
-screening/universe.py       default sector-grouped ticker universe + candidate pair generation
+screening/universe.py       73-ticker / 13-sector universe + candidate pair generation
 screening/cointegration.py  Engle-Granger two-step test (OLS hedge ratio -> ADF on residual),
-                             AR(1)/OU half-life estimation, full-universe screen
-signals/spread.py           spread construction, causal rolling z-score, entry/exit/stop-loss
-                             state machine, HedgeRatioModel interface (StaticOLSHedgeRatio for v1)
+                             AR(1)/OU half-life estimation, BH FDR correction, out-of-sample
+                             validation, full-universe screen
+screening/regime.py         macro regime overlay: VIX/GVZ/10y/dollar/oil panel, causal rolling
+                             stress-percentile mask (entries-allowed), spread-vs-macro diagnostics
+signals/spread.py           spread construction, causal rolling z-score, entry/exit/stop-loss/
+                             time-exit state machine; hedge ratio models: StaticOLS + Kalman
+                             filter (per-bar beta AND one-step-ahead innovation z-scores)
 backtest/simulator.py       PairBacktester — costs/slippage, dollar-neutral sizing, max-concurrent-
-                             pairs cap, periodic rolling re-cointegration checks per pair
+                             pairs cap, rolling re-cointegration gating, daily mark-to-market;
+                             hedge modes: "regime" | "kalman" | "kalman_innovation"
 backtest/metrics.py         Sharpe, max drawdown, win rate, profit factor, trade stats
+montecarlo/simulator.py     OU fit + 1000-path simulation + per-path strategy P&L,
+                             net of transaction costs, slippage, and short-leg borrow
 reporting/daily_report.py   "what would today's signal be" — pure computation, no execution
-visualization/plots.py      spread/z-score, equity curve, cointegration p-value heatmap
-tests/                      pytest suite on synthetic/seeded fixtures — no network
+reporting/journal.py        forward-test journal: idempotent daily signal log + outcome grader
+visualization/plots.py      static matplotlib figures (spread/z, equity, heatmap, MC fan PNG)
+visualization/interactive.py dark-theme Plotly dashboards (fan chart, P&L, spread/z, equity)
+tests/                      105-test pytest suite on synthetic/seeded fixtures — no network
 run_demo.py                 deterministic, no-network demo of the full pipeline
-run_screen.py                live yfinance screen -> backtest -> daily signal report
-run_pair_study.py            deep-dive on one pair: diagnostics + regime-vs-Kalman backtest
-run_montecarlo.py            1000-path OU Monte Carlo -> interactive Plotly dashboards,
-                             gross AND net-of-costs P&L distributions
-run_journal.py               forward-test journal: log today's signals, grade old entries
-                             against outcomes (outputs/signal_journal.csv, tracked in git)
-run_live_monitor.py          intraday monitor: fast-poll prices, live z-score + signal state,
-                             auto-refreshing HTML dashboard (outputs/live_monitor.html)
+run_screen.py                live screen -> regime overlay -> backtest -> daily signal report
+run_pair_study.py            one-pair diagnostics + 3-mode backtest comparison
+run_montecarlo.py            1000-path OU Monte Carlo -> interactive dashboards, gross AND net P&L
+run_journal.py               forward-test journal runner (outputs/signal_journal.csv, git-tracked)
+run_live_monitor.py          REAL-TIME monitor: Yahoo websocket streaming (default) with polling
+                             fallback, live z-score + signal state, auto-refreshing dashboard
+docs/                        published interactive dashboards (GitHub Pages)
 ```
 
 ## Setup
@@ -61,12 +69,33 @@ Deep-dive one pair (diagnostics + regime-OLS vs Kalman hedge backtest):
 py run_pair_study.py GDX GLD
 ```
 
-Live intraday monitor (polls every ~30s, writes an auto-refreshing dashboard
-to `outputs/live_monitor.html` — open it in a browser; Ctrl+C to stop):
+Real-time intraday monitor (streams live ticks over Yahoo's websocket by
+default, falling back to polling automatically; writes an auto-refreshing
+dashboard to `outputs/live_monitor.html` — open it in a browser; Ctrl+C to stop):
 
 ```
-py run_live_monitor.py GDX GLD --poll 30
+py run_live_monitor.py GDX GLD                # stream mode (default)
+py run_live_monitor.py GDX GLD --mode poll    # polling fallback, --poll 30
 ```
+
+Forward-test journal (run once a day; grades entries after their 10-bar
+outcome window closes):
+
+```
+py run_journal.py GDX GLD
+```
+
+## Interactive dashboards (GitHub Pages)
+
+The `docs/` folder contains the published interactive Plotly dashboards —
+the 1,000-path Monte Carlo fan chart, net-of-costs P&L distribution,
+spread/z-score with signal bands, backtest equity curve, and a live-monitor
+snapshot — with an index page linking them all. To serve them as live pages,
+enable GitHub Pages once in the repo settings (Settings -> Pages -> Deploy
+from a branch -> `main` / `docs`); they then render at
+`https://ryanakratzer-cpu.github.io/pairs-trading-engine/`. Regenerate the
+dashboards any time with `py run_montecarlo.py GDX GLD` and copy the
+refreshed `outputs/interactive_*.html` files into `docs/`.
 
 Run the tests:
 
@@ -104,14 +133,24 @@ py -m pytest
   demo to zero output when nothing survives correction.
 - `KalmanHedgeRatio` (`signals/spread.py`) provides a strictly causal,
   per-bar time-varying hedge ratio via a 2-state (intercept, beta) random-walk
-  Kalman filter; `PairBacktestConfig(hedge_ratio_mode="kalman")` uses it in
-  the backtester in place of the piecewise regime-OLS fit. Caveat learned in
-  live testing: generating signals from a *rolling z-score of the Kalman
-  spread* under-trades badly (the adaptive beta absorbs the very divergences
-  the strategy exists to trade). The canonical fix — trading the Kalman
-  *innovations* directly — is flagged as future work; for now the regime-OLS
-  mode is the recommended trading configuration and the Kalman beta serves as
-  a drift diagnostic.
+  Kalman filter, plus `innovation_series()` — the filter's standardized
+  one-step-ahead surprises. Three backtest hedge modes:
+  `"regime"` (piecewise OLS, re-fit at each rolling recheck),
+  `"kalman"` (per-bar beta, rolling z of the Kalman spread — documented to
+  under-trade because the adaptive beta absorbs divergences), and
+  `"kalman_innovation"` (trades the innovation z-score directly, the
+  canonical fix). Calibration matters for the innovation mode: the filter's
+  observation-variance sets the z-score's noise floor, so
+  `PairBacktestConfig.kalman_innovation_obs_variance` (default 1e-4) should
+  be in the ballpark of the pair's actual daily noise variance or the
+  z-scores are structurally under-dispersed and never reach the entry band.
+- `screening/regime.py` overlays macro regime awareness: causal rolling
+  percentile ranks of VIX and gold-vol (GVZ) produce a stress mask
+  (entries-allowed) compatible with `generate_signals`' `tradeable`
+  parameter, plus spread-vs-macro correlation diagnostics (10y yield, dollar,
+  oil). Currently informational in `run_screen.py` — it does not gate the
+  backtest yet. Missing macro data defaults to calm so a data outage cannot
+  silently halt trading.
 - `SignalConfig.max_holding_bars` adds a time-based exit (`TIME_EXIT`): if a
   position hasn't converged within ~2-3x the pair's half-life, the
   mean-reversion thesis has failed — exit rather than sit through further

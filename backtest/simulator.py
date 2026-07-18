@@ -38,13 +38,23 @@ class PairBacktestConfig:
     # "regime": piecewise-constant OLS hedge ratio re-fit at each rolling
     # re-cointegration check. "kalman": per-bar causal Kalman-filter beta
     # (adapts continuously; the rolling recheck still gates tradeability).
+    # "kalman_innovation": same per-bar beta, but the signal z-score is the
+    # filter's standardized one-step-ahead innovation instead of a rolling
+    # z-score of the spread (fixes the documented under-trading of "kalman").
     hedge_ratio_mode: str = "regime"
     kalman_delta: float = 1e-5
+    # Observation variance for the innovation-mode filter only. Deliberately
+    # smaller than the KalmanHedgeRatio class default (1e-3, tuned for smooth
+    # betas): sqrt(R) floors the innovation std, and 1e-3 assumes ~3% daily
+    # log-price noise, far above what liquid ETFs actually show, which squashes
+    # every |z| below the entry threshold and reproduces the under-trading the
+    # mode exists to fix. 1e-4 (~1% daily) keeps z roughly unit-scale.
+    kalman_innovation_obs_variance: float = 1e-4
     signal_config: SignalConfig = field(default_factory=SignalConfig)
 
     def __post_init__(self) -> None:
-        if self.hedge_ratio_mode not in ("regime", "kalman"):
-            raise ValueError('hedge_ratio_mode must be "regime" or "kalman"')
+        if self.hedge_ratio_mode not in ("regime", "kalman", "kalman_innovation"):
+            raise ValueError('hedge_ratio_mode must be "regime", "kalman", or "kalman_innovation"')
 
     @classmethod
     def conservative(cls) -> "PairBacktestConfig":
@@ -130,22 +140,38 @@ def _build_regime_hedge_ratios(
 def _prepare_pair_series(price_a: pd.Series, price_b: pd.Series, config: PairBacktestConfig) -> dict:
     regime_hedge_ratios, tradeable = _build_regime_hedge_ratios(price_a, price_b, config)
 
-    if config.hedge_ratio_mode == "kalman":
-        # Per-bar causal beta; the regime recheck still decides tradeability,
-        # but the spread itself adapts continuously instead of jumping at each
-        # re-fit. Mask the warm-up period (before the first successful regime
-        # check) to match the regime mode's effective start.
-        kalman = KalmanHedgeRatio(delta=config.kalman_delta)
+    if config.hedge_ratio_mode == "kalman_innovation":
+        # Trade the filter's standardized one-step-ahead surprises directly.
+        # A rolling z-score of the Kalman spread under-trades because the
+        # adaptive beta absorbs divergences into the state; the innovation
+        # z-score measures exactly what the filter could not explain and is
+        # already normalized, so no rolling window is needed. The regime
+        # recheck still gates tradeability exactly as in the other modes.
+        kalman = KalmanHedgeRatio(
+            delta=config.kalman_delta,
+            observation_variance=config.kalman_innovation_obs_variance,
+        )
         hedge_ratios = kalman.hedge_ratio_series(price_a, price_b, config.use_log_prices)
-        hedge_ratios = hedge_ratios.where(regime_hedge_ratios.notna())
+        innovations = kalman.innovation_series(price_a, price_b, config.use_log_prices)
+        spread = innovations["innovation"]  # kept for plots/diagnostics
+        zscore = innovations["zscore"]
     else:
-        hedge_ratios = regime_hedge_ratios
+        if config.hedge_ratio_mode == "kalman":
+            # Per-bar causal beta; the regime recheck still decides tradeability,
+            # but the spread itself adapts continuously instead of jumping at each
+            # re-fit. Mask the warm-up period (before the first successful regime
+            # check) to match the regime mode's effective start.
+            kalman = KalmanHedgeRatio(delta=config.kalman_delta)
+            hedge_ratios = kalman.hedge_ratio_series(price_a, price_b, config.use_log_prices)
+            hedge_ratios = hedge_ratios.where(regime_hedge_ratios.notna())
+        else:
+            hedge_ratios = regime_hedge_ratios
 
-    a = np.log(price_a) if config.use_log_prices else price_a
-    b = np.log(price_b) if config.use_log_prices else price_b
-    spread = a - hedge_ratios * b
+        a = np.log(price_a) if config.use_log_prices else price_a
+        b = np.log(price_b) if config.use_log_prices else price_b
+        spread = a - hedge_ratios * b
+        zscore = rolling_zscore(spread, config.signal_config.zscore_window)
 
-    zscore = rolling_zscore(spread, config.signal_config.zscore_window)
     signals = generate_signals(zscore, config.signal_config, tradeable=tradeable)
 
     return {"hedge_ratios": hedge_ratios, "spread": spread, "zscore": zscore, "signals": signals}
