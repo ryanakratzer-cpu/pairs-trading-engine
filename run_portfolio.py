@@ -100,15 +100,24 @@ def main() -> None:
         daily_pnl = result["equity_curve"].diff().dropna()
         returns_by_pair[name] = daily_pnl / config.capital_per_pair
         spread = np.log(prices[ticker_a]) - hedge_ratio * np.log(prices[ticker_b])
+        # Gate-aware mu: scale the OU cycle count by the fraction of days the
+        # pair's re-cointegration gate actually allowed entries, so the model
+        # expectation lives on the same scale as realized returns.
+        prepared = result["per_pair"].get((ticker_a, ticker_b))
+        tradeable_frac = float(prepared["tradeable"].mean()) if prepared is not None else 1.0
         mu_ou[name] = ou_expected_annual_return(
             fit_ou(spread.dropna()),
             config.signal_config,
             notional=config.capital_per_pair,
             transaction_cost_bps=config.transaction_cost_bps,
             slippage_bps=config.slippage_bps,
+            tradeable_fraction=tradeable_frac,
         )
         n_trades = len(result["trade_log"])
-        print(f"  {name}: OU expected return {mu_ou[name]:+.1%}/yr, {n_trades} backtest trades")
+        print(
+            f"  {name}: OU expected return {mu_ou[name]:+.1%}/yr "
+            f"(entry gate open {tradeable_frac:.0%} of days), {n_trades} backtest trades"
+        )
 
     returns = pd.DataFrame(returns_by_pair).dropna()
     flat = [c for c in returns.columns if returns[c].std() == 0]

@@ -28,6 +28,7 @@ from screening.regime import (
     macro_spread_diagnostics,
     stress_percentile_ranks,
 )
+from screening.events import event_exclusion_mask
 from screening.universe import default_universe, generate_candidate_pairs
 from signals.spread import SignalConfig
 from visualization.plots import plot_cointegration_heatmap, plot_equity_curve, plot_spread_and_zscore
@@ -77,9 +78,11 @@ def main(journal: bool = False) -> None:
     heatmap_path = plot_cointegration_heatmap(results.head(20), title="live_cointegration_pvalues")
     print(f"  saved {heatmap_path}")
 
-    # Informational only for now: the regime mask is NOT gating the screen or
-    # the backtest below. Wiring it into the backtester is a separate step.
-    print("\n[macro] Regime overlay (informational, not gating anything yet)")
+    # The stress mask GATES the backtest below (new entries blocked on
+    # stressed days); a macro fetch failure degrades to event-gating only
+    # rather than breaking the screen.
+    entries_allowed: pd.Series | None = None
+    print("\n[macro] Regime overlay (gating new entries in the backtest)")
     try:
         macro_panel = fetch_macro_panel(start, end)
         regime_config = RegimeConfig()
@@ -99,6 +102,7 @@ def main(journal: bool = False) -> None:
         n_stressed = int((~mask).sum())
         print(f"  current regime: {regime_label} [{detail}]")
         print(f"  {n_stressed}/{len(mask)} days in the lookback flagged stressed")
+        entries_allowed = mask.reindex(prices.index).fillna(True)
 
         if len(results) > 0:
             top = results.iloc[0]
@@ -111,6 +115,16 @@ def main(journal: bool = False) -> None:
             print(diagnostics.to_string(index=False))
     except Exception as exc:  # macro fetch failure must never break the screen
         print(f"  WARNING: macro regime step skipped ({exc})")
+
+    # Event-exclusion windows (FOMC decision days, US federal elections):
+    # scheduled, known in advance, and the most predictable volatility
+    # clusters — block new entries the day before through the day after.
+    event_mask = event_exclusion_mask(prices.index)
+    n_event_blocked = int((~event_mask).sum())
+    print(f"  [events] {n_event_blocked}/{len(event_mask)} days in FOMC/election blackout windows")
+    entries_allowed = event_mask if entries_allowed is None else (entries_allowed & event_mask)
+    n_blocked_total = int((~entries_allowed).sum())
+    print(f"  [gate] combined entry gate blocks {n_blocked_total}/{len(entries_allowed)} days")
 
     # Backtest/report on the out-of-sample survivors when there are any — this is
     # the strongest available filter, since it directly tests whether the fitted
@@ -130,7 +144,7 @@ def main(journal: bool = False) -> None:
         print("  no pairs passed the screen - skipping backtest")
     else:
         backtest_config = getattr(PairBacktestConfig, RISK_PROFILE)()
-        result = PairBacktester(backtest_config).run(prices, top_pairs)
+        result = PairBacktester(backtest_config).run(prices, top_pairs, entries_allowed=entries_allowed)
         metrics = compute_metrics(result["equity_curve"], result["trade_log"])
         print(
             f"  trades={metrics['n_trades']}, total_return={metrics['total_return']:.2%}, "

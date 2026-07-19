@@ -97,6 +97,7 @@ def ou_expected_annual_return(
     notional: float = 10_000.0,
     transaction_cost_bps: float = 5.0,
     slippage_bps: float = 5.0,
+    tradeable_fraction: float = 1.0,
 ) -> float:
     """Analytic-heuristic expected annual return (as a fraction of `notional`)
     of trading the entry/exit bands on an OU spread with these parameters.
@@ -115,10 +116,21 @@ def ou_expected_annual_return(
     A fit with no detected reversion (theta <= 0) returns 0.0 — the strategy
     has no modeled edge there, and the optimizer should see that, not a
     historical-mean artifact.
+
+    `tradeable_fraction` is the gate-awareness fix: the raw heuristic assumes
+    the pair is ALWAYS in a tradeable cycle, but in practice the rolling
+    re-cointegration gate (and any macro/event gate) blocks entries much of
+    the time — which is why raw OU expectations ran 20-55%/yr against ~0%
+    realized. Pass the backtester's realized fraction of entry-allowed days
+    (`prepared["tradeable"].mean()`) to scale the number of cycles the
+    strategy can actually harvest, putting model and realized Sharpe on one
+    scale.
     """
     signal_config = signal_config or SignalConfig()
     if fit.half_life_days is None or fit.stationary_std is None:
         return 0.0
+    if not 0.0 <= tradeable_fraction <= 1.0:
+        raise ValueError(f"tradeable_fraction must be in [0, 1], got {tradeable_fraction}")
 
     capture_per_trade = (signal_config.entry_z - signal_config.exit_z) * fit.stationary_std * notional
     cost_rate = (transaction_cost_bps + slippage_bps) / 10_000
@@ -126,7 +138,7 @@ def ou_expected_annual_return(
     pnl_per_trade = capture_per_trade - round_trip_cost
 
     cycle_days = 4.0 * fit.half_life_days
-    trades_per_year = TRADING_DAYS / max(cycle_days, 1.0)
+    trades_per_year = tradeable_fraction * TRADING_DAYS / max(cycle_days, 1.0)
 
     return trades_per_year * pnl_per_trade / notional
 

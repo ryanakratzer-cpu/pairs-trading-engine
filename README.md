@@ -23,7 +23,12 @@ signals/spread.py           spread construction, causal rolling z-score, entry/e
                              filter (per-bar beta AND one-step-ahead innovation z-scores)
 backtest/simulator.py       PairBacktester — costs/slippage, dollar-neutral sizing, max-concurrent-
                              pairs cap, rolling re-cointegration gating, daily mark-to-market;
-                             hedge modes: "regime" | "kalman" | "kalman_innovation"
+                             hedge modes: "regime" | "kalman" | "kalman_innovation";
+                             external entries_allowed gate (macro stress + event masks)
+backtest/walkforward.py     walk-forward validation: pair survival (screen decay rate),
+                             parameter overfitting test, allocation weights out-of-sample
+screening/events.py         FOMC/election event-exclusion masks (entries blocked around
+                             scheduled macro events)
 backtest/metrics.py         Sharpe, max drawdown, win rate, profit factor, trade stats
 montecarlo/simulator.py     OU fit + 1000-path simulation + per-path strategy P&L,
                              net of transaction costs, slippage, and short-leg borrow
@@ -43,6 +48,8 @@ run_montecarlo.py            1000-path OU Monte Carlo -> interactive dashboards,
 run_journal.py               forward-test journal runner (outputs/signal_journal.csv, git-tracked)
 run_portfolio.py             live screen -> per-pair strategy returns -> efficient frontier,
                              tangency/min-var/equal-weight comparison + interactive frontier chart
+run_walkforward.py           walk-forward validation: screened-pair survival rate, band
+                             optimization vs textbook defaults, allocator out-of-sample
 run_live_monitor.py          REAL-TIME monitor: Yahoo websocket streaming (default) with polling
                              fallback, live z-score + signal state, auto-refreshing dashboard
 docs/                        published interactive dashboards (GitHub Pages)
@@ -154,9 +161,22 @@ py -m pytest
   percentile ranks of VIX and gold-vol (GVZ) produce a stress mask
   (entries-allowed) compatible with `generate_signals`' `tradeable`
   parameter, plus spread-vs-macro correlation diagnostics (10y yield, dollar,
-  oil). Currently informational in `run_screen.py` — it does not gate the
-  backtest yet. Missing macro data defaults to calm so a data outage cannot
-  silently halt trading.
+  oil). As of 2026-07 this mask, ANDed with `screening/events.py`'s
+  FOMC/election blackout windows, GATES the backtest in `run_screen.py` via
+  `PairBacktester.run(..., entries_allowed=mask)` — it blocks new entries
+  only; open positions still exit/stop on their own terms. Missing macro data
+  defaults to calm so a data outage cannot silently halt trading.
+- `backtest/walkforward.py` is the honesty harness: formation/holdout rolling
+  splits reused three ways — `pair_survival_study` (does a screened pair stay
+  cointegrated next quarter? NB: ADF is underpowered on a 63-bar holdout, so
+  rates are conservative lower bounds), `parameter_study` (formation-picked
+  entry/exit/stop bands vs textbook defaults on held-out data), and
+  `allocation_study` (formation-fit tangency/min-var weights vs 1/N on
+  held-out returns). First live run (2026-07-19, 5 windows): survival rate
+  7% at p<0.05 (11% at p<0.10); textbook default bands BEAT formation-optimized
+  bands on holdout (mean Sharpe 1.32 vs 1.01) — don't tune the bands; and
+  min-variance was the only allocation with positive mean holdout Sharpe
+  (+0.19 vs 1/N -0.15, tangency -0.24), consistent with the in-sample hint.
 - `SignalConfig.max_holding_bars` adds a time-based exit (`TIME_EXIT`): if a
   position hasn't converged within ~2-3x the pair's half-life, the
   mean-reversion thesis has failed — exit rather than sit through further

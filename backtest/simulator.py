@@ -137,8 +137,21 @@ def _build_regime_hedge_ratios(
     return hedge_ratios, tradeable
 
 
-def _prepare_pair_series(price_a: pd.Series, price_b: pd.Series, config: PairBacktestConfig) -> dict:
+def _prepare_pair_series(
+    price_a: pd.Series,
+    price_b: pd.Series,
+    config: PairBacktestConfig,
+    entries_allowed: pd.Series | None = None,
+) -> dict:
     regime_hedge_ratios, tradeable = _build_regime_hedge_ratios(price_a, price_b, config)
+
+    # External entry gate (macro stress mask, event-exclusion windows) ANDed
+    # with the pair's own re-cointegration gate. Like the rolling recheck, it
+    # only blocks NEW entries — open positions still exit/stop normally.
+    # Dates the gate doesn't cover default to allowed, matching regime.py's
+    # missing-data-defaults-to-calm convention so a gap can't halt trading.
+    if entries_allowed is not None:
+        tradeable = tradeable & entries_allowed.reindex(tradeable.index).fillna(True)
 
     if config.hedge_ratio_mode == "kalman_innovation":
         # Trade the filter's standardized one-step-ahead surprises directly.
@@ -174,7 +187,13 @@ def _prepare_pair_series(price_a: pd.Series, price_b: pd.Series, config: PairBac
 
     signals = generate_signals(zscore, config.signal_config, tradeable=tradeable)
 
-    return {"hedge_ratios": hedge_ratios, "spread": spread, "zscore": zscore, "signals": signals}
+    return {
+        "hedge_ratios": hedge_ratios,
+        "spread": spread,
+        "zscore": zscore,
+        "signals": signals,
+        "tradeable": tradeable,
+    }
 
 
 class PairBacktester:
@@ -187,7 +206,17 @@ class PairBacktester:
     def __init__(self, config: PairBacktestConfig | None = None):
         self.config = config or PairBacktestConfig()
 
-    def run(self, price_panel: pd.DataFrame, pairs: list[tuple[str, str]]) -> dict:
+    def run(
+        self,
+        price_panel: pd.DataFrame,
+        pairs: list[tuple[str, str]],
+        entries_allowed: pd.Series | None = None,
+    ) -> dict:
+        """`entries_allowed` (boolean, indexed by date; True = entries allowed)
+        is an external gate ANDed with every pair's re-cointegration gate —
+        this is where the macro regime stress mask and event-exclusion windows
+        plug in. It never forces an exit; it only blocks new entries.
+        """
         config = self.config
         prepared: dict[tuple[str, str], dict] = {}
 
@@ -199,7 +228,9 @@ class PairBacktester:
                 continue
             prepared[(ticker_a, ticker_b)] = {
                 "prices": pair_prices,
-                **_prepare_pair_series(pair_prices[ticker_a], pair_prices[ticker_b], config),
+                **_prepare_pair_series(
+                    pair_prices[ticker_a], pair_prices[ticker_b], config, entries_allowed
+                ),
             }
 
         if not prepared:
