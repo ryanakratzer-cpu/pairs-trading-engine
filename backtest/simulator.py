@@ -307,10 +307,22 @@ class PairBacktester:
             last_date = all_dates[-1]
             for pair_key, open_pos in list(open_positions.items()):
                 pair_data = prepared[pair_key]
-                if last_date not in pair_data["prices"].index:
-                    continue
-                price_a = pair_data["prices"].loc[last_date, pair_key[0]]
-                price_b = pair_data["prices"].loc[last_date, pair_key[1]]
+                # A pair can end BEFORE the global last date on a ragged panel
+                # (differing listing/delisting dates survive the per-pair
+                # dropna in run()). Liquidating only at the global last_date
+                # would `continue` past such a pair and silently drop the open
+                # position — its entry cost was already charged and its P&L
+                # would never be realized, breaking the module's "always fully
+                # realized" contract. Liquidate at that pair's OWN last
+                # available bar instead. For the common aligned-panel case this
+                # is exactly last_date, so behavior there is unchanged.
+                pair_last_date = (
+                    last_date
+                    if last_date in pair_data["prices"].index
+                    else pair_data["prices"].index[-1]
+                )
+                price_a = pair_data["prices"].loc[pair_last_date, pair_key[0]]
+                price_b = pair_data["prices"].loc[pair_last_date, pair_key[1]]
                 pnl = self._close_position(open_pos, price_a, price_b)
                 realized_pnl += pnl
                 trade_log_rows.append(
@@ -319,8 +331,8 @@ class PairBacktester:
                         "ticker_b": pair_key[1],
                         "position": open_pos.position,
                         "entry_date": open_pos.entry_date,
-                        "exit_date": last_date,
-                        "holding_days": (last_date - open_pos.entry_date).days,
+                        "exit_date": pair_last_date,
+                        "holding_days": (pair_last_date - open_pos.entry_date).days,
                         "pnl": pnl,
                         "exit_reason": "END_OF_SAMPLE",
                     }

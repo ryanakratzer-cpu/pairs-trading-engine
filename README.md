@@ -31,6 +31,8 @@ screening/events.py         FOMC/election event-exclusion masks (entries blocked
                              scheduled macro events)
 screening/focus_book.py     the focus book: fixed, persistence-selected portfolio of the
                              most durable pairs (one per sector) with per-pair evidence
+screening/book_refresh.py   monthly refresh: re-rank pairs by walk-forward persistence,
+                             compare vs the current book, PROPOSE changes (never mutates)
 backtest/metrics.py         Sharpe, max drawdown, win rate, profit factor, trade stats
 montecarlo/simulator.py     OU fit + 1000-path simulation + per-path strategy P&L,
                              net of transaction costs, slippage, and short-leg borrow
@@ -55,6 +57,8 @@ run_walkforward.py           walk-forward validation: screened-pair survival rat
 run_focus_book.py            track the fixed focus book as one min-variance-weighted,
                              macro/event-gated portfolio + daily signal report + journal
                              (--review prints each member's evidence)
+run_book_refresh.py          monthly persistence re-ranking; writes a dated proposal report
+                             to ../book_refresh_reports/ (proposal only, never edits the book)
 run_live_monitor.py          REAL-TIME monitor: Yahoo websocket streaming (default) with polling
                              fallback, live z-score + signal state, auto-refreshing dashboard
 docs/                        published interactive dashboards (GitHub Pages)

@@ -2,8 +2,28 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from backtest.simulator import PairBacktestConfig, PairBacktester, _build_regime_hedge_ratios
+from backtest.simulator import (
+    PairBacktestConfig,
+    PairBacktester,
+    _build_regime_hedge_ratios,
+    _prepare_pair_series,
+)
 from signals.spread import SignalConfig
+
+
+def _rw(n, sigma, x0, seed):
+    rng = np.random.default_rng(seed)
+    steps = sigma * rng.standard_normal(n)
+    steps[0] = 0.0
+    return x0 + np.cumsum(steps)
+
+
+def _ou(n, theta, sigma, seed):
+    rng = np.random.default_rng(seed)
+    x = np.zeros(n)
+    for t in range(1, n):
+        x[t] = x[t - 1] + theta * (0.0 - x[t - 1]) + sigma * rng.standard_normal()
+    return x
 
 
 def test_risk_profile_presets_are_valid_and_ordered_by_exposure():
@@ -113,6 +133,109 @@ def test_open_position_still_open_at_data_end_is_force_liquidated(cointegrated_p
     final_equity = truncated_result["equity_curve"].iloc[-1]
     total_pnl = truncated_result["trade_log"]["pnl"].sum()
     assert final_equity == pytest.approx(config.initial_capital + total_pnl)
+
+
+def test_position_open_at_a_pairs_own_data_end_is_liquidated_on_ragged_panel():
+    """Regression: on a ragged panel one pair can stop trading before the
+    global last date (differing listing/delisting windows survive the per-pair
+    dropna). A position still open at THAT pair's own last bar must be
+    force-liquidated there, not silently dropped. Previously the END_OF_SAMPLE
+    block skipped any pair lacking the global last_date, discarding the open
+    position's already-charged entry cost and its P&L entirely.
+    """
+    n = 400
+    idx = pd.bdate_range("2022-01-03", periods=n)
+    # LONG pair supplies the full-length index; SHORT pair is truncated early.
+    long_b = _rw(n, 0.01, np.log(60), 1)
+    long_a = 0.9 * long_b + _ou(n, 0.12, 0.02, 2)
+    short_b = _rw(n, 0.01, np.log(50), 3)
+    short_a = 0.9 * short_b + _ou(n, 0.12, 0.02, 4)
+    panel = pd.DataFrame(
+        {
+            "LA": np.exp(long_a),
+            "LB": np.exp(long_b),
+            "SA": np.exp(short_a),
+            "SB": np.exp(short_b),
+        },
+        index=idx,
+    )
+    config = PairBacktestConfig(
+        recheck_window_days=100,
+        recheck_freq_days=50,
+        signal_config=SignalConfig(zscore_window=15, entry_z=1.0, exit_z=0.3, stop_z=4.0),
+        max_concurrent_pairs=5,
+    )
+
+    # Find a bar in the tail where SA/SB genuinely holds an open position, and
+    # truncate the short pair's data one bar later so the position is open at
+    # its final available bar.
+    short_signals = _prepare_pair_series(panel["SA"], panel["SB"], config)["signals"]
+    open_bars = [i for i in range(260, 299) if short_signals.iloc[i]["position"] != 0]
+    assert open_bars, "fixture must hold an open SA/SB position in the tail"
+    trunc = open_bars[3]
+
+    ragged = panel.copy()
+    ragged.loc[idx[trunc + 1 :], ["SA", "SB"]] = np.nan
+    assert ragged["SA"].last_valid_index() < idx[-1]  # short pair really ends early
+
+    result = PairBacktester(config).run(ragged, [("LA", "LB"), ("SA", "SB")])
+    trade_log = result["trade_log"]
+
+    short_trades = trade_log[trade_log["ticker_a"] == "SA"]
+    eos = short_trades[short_trades["exit_reason"] == "END_OF_SAMPLE"]
+    assert len(eos) == 1, "the dangling short-pair position must be force-liquidated"
+    assert eos.iloc[0]["exit_date"] == ragged["SA"].last_valid_index()
+
+    # And with nothing dropped, total realized P&L reconciles with final equity.
+    final_equity = result["equity_curve"].iloc[-1]
+    assert final_equity == pytest.approx(config.initial_capital + trade_log["pnl"].sum())
+
+
+def test_backtest_equity_is_causal_to_future_prices():
+    """Regression / look-ahead guard: perturbing prices strictly AFTER a cutoff
+    date must leave the equity curve and all trades closed on/before the cutoff
+    bit-for-bit unchanged. Catches any signal, hedge-ratio recheck, rolling
+    stat, or MTM that peeks at or beyond the bar it acts on.
+    """
+    n = 400
+    idx = pd.bdate_range("2022-01-03", periods=n)
+    log_b = _rw(n, 0.01, np.log(60), 10)
+    log_a = 0.9 * log_b + _ou(n, 0.12, 0.02, 11)
+    panel = pd.DataFrame({"A": np.exp(log_a), "B": np.exp(log_b)}, index=idx)
+
+    config = PairBacktestConfig(
+        recheck_window_days=100,
+        recheck_freq_days=50,
+        signal_config=SignalConfig(zscore_window=15, entry_z=1.0, exit_z=0.3, stop_z=4.0),
+        max_concurrent_pairs=1,
+    )
+    base = PairBacktester(config).run(panel, [("A", "B")])
+
+    cut = 250
+    cut_date = idx[cut]
+    perturbed_panel = panel.copy()
+    rng = np.random.default_rng(999)
+    shock = 1 + rng.normal(0.0, 0.05, size=(n - cut - 1, 2))
+    perturbed_panel.iloc[cut + 1 :] = perturbed_panel.iloc[cut + 1 :].to_numpy() * shock
+    perturbed = PairBacktester(config).run(perturbed_panel, [("A", "B")])
+
+    base_eq = base["equity_curve"][base["equity_curve"].index <= cut_date]
+    pert_eq = perturbed["equity_curve"][perturbed["equity_curve"].index <= cut_date]
+    pd.testing.assert_series_equal(base_eq, pert_eq)
+
+    cols = ["entry_date", "exit_date", "position", "pnl", "exit_reason"]
+    base_closed = (
+        base["trade_log"][base["trade_log"]["exit_date"] <= cut_date]
+        .sort_values("entry_date")
+        .reset_index(drop=True)
+    )
+    pert_closed = (
+        perturbed["trade_log"][perturbed["trade_log"]["exit_date"] <= cut_date]
+        .sort_values("entry_date")
+        .reset_index(drop=True)
+    )
+    assert not base_closed.empty
+    pd.testing.assert_frame_equal(base_closed[cols], pert_closed[cols])
 
 
 def test_config_rejects_unknown_hedge_ratio_mode():
