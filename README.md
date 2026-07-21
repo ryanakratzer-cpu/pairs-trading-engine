@@ -29,6 +29,8 @@ backtest/walkforward.py     walk-forward validation: pair survival (screen decay
                              parameter overfitting test, allocation weights out-of-sample
 screening/events.py         FOMC/election event-exclusion masks (entries blocked around
                              scheduled macro events)
+screening/focus_book.py     the focus book: fixed, persistence-selected portfolio of the
+                             most durable pairs (one per sector) with per-pair evidence
 backtest/metrics.py         Sharpe, max drawdown, win rate, profit factor, trade stats
 montecarlo/simulator.py     OU fit + 1000-path simulation + per-path strategy P&L,
                              net of transaction costs, slippage, and short-leg borrow
@@ -50,6 +52,9 @@ run_portfolio.py             live screen -> per-pair strategy returns -> efficie
                              tangency/min-var/equal-weight comparison + interactive frontier chart
 run_walkforward.py           walk-forward validation: screened-pair survival rate, band
                              optimization vs textbook defaults, allocator out-of-sample
+run_focus_book.py            track the fixed focus book as one min-variance-weighted,
+                             macro/event-gated portfolio + daily signal report + journal
+                             (--review prints each member's evidence)
 run_live_monitor.py          REAL-TIME monitor: Yahoo websocket streaming (default) with polling
                              fallback, live z-score + signal state, auto-refreshing dashboard
 docs/                        published interactive dashboards (GitHub Pages)
@@ -225,6 +230,20 @@ py -m pytest
   far above realized returns whenever the re-cointegration gate blocks
   entries for long stretches. Treat model-Sharpe levels as ranking
   information, not forecasts.
+
+- `screening/focus_book.py` is the answer to "manage a diversified book, not
+  one pair": a fixed, persistence-selected portfolio of 5 pairs (ABT/MRK,
+  ALL/TRV, DUK/SO, COST/PEP, COP/SLB), one per sector, chosen by walk-forward
+  formation-passes rather than a single day's p-value — because the 7% OOS
+  survival rate makes any single pair unreliable, so the edge (if any) is a
+  diversified book where individual breakdowns average out. The insurance
+  cluster (ALL/TRV/AIG/PRU/MET all co-moved) gets exactly one slot. Structural
+  near-twins and sub-5-day half-lives are excluded by construction (enforced
+  in tests). `run_focus_book.py` backtests the book gated + min-variance-
+  weighted and reports today's per-pair signal; `--review` reprints each
+  member's evidence so membership drift is visible. It is a research
+  watchlist — revisit membership when a fresh walk-forward run changes the
+  ranking.
 
 ## Known limitations
 
