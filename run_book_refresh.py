@@ -24,13 +24,19 @@ Usage:
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
 
 from data.loader import align_and_clean, fetch_price_history
-from screening.book_refresh import compare_to_current_book, rank_pairs
+from screening.book_refresh import (
+    build_history_record,
+    compare_to_current_book,
+    governance_actions,
+    rank_pairs,
+)
 from screening.focus_book import FOCUS_BOOK
 from screening.universe import default_universe, generate_candidate_pairs
 
@@ -39,6 +45,32 @@ TOP_N = 5
 REPORT_DIR = Path(
     r"C:\Users\ryana\OneDrive\Desktop\Ryan's Obsidian\01_RAW_CLIPS\quant_research\book_refresh_reports"
 )
+# Hysteresis history: the record of prior refreshes the governance rule reads to
+# decide whether drift is sustained (same screen-passing challenger for N runs)
+# rather than a one-month blip.
+HISTORY_PATH = REPORT_DIR / "refresh_history.json"
+
+
+def _load_history(today: str) -> list[dict]:
+    """Prior refresh records, oldest first, EXCLUDING any record already stamped
+    with today's date so a same-day re-run doesn't double-count the current run
+    into its own streak."""
+    if not HISTORY_PATH.exists():
+        return []
+    try:
+        history = json.loads(HISTORY_PATH.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return []
+    return [r for r in history if r.get("date") != today]
+
+
+def _save_history(history: list[dict], record: dict) -> None:
+    """Append this run's record (replacing any existing same-date record) and
+    persist, so the sequence stays one-per-date and idempotent per day."""
+    kept = [r for r in history if r.get("date") != record["date"]]
+    kept.append(record)
+    HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
+    HISTORY_PATH.write_text(json.dumps(kept, indent=2), encoding="utf-8")
 
 
 def _fmt(value, spec: str = "") -> str:
@@ -101,7 +133,23 @@ def _proposed_rows(proposed: pd.DataFrame, current_labels: set[str]) -> list[lis
     return rows
 
 
-def _build_markdown(date_str: str, result, comparison) -> str:
+def _governance_rows(governance: pd.DataFrame) -> list[list[str]]:
+    rows = []
+    for _, r in governance.iterrows():
+        rows.append(
+            [
+                r["label"],
+                str(r["sector"]),
+                r["recommended_action"],
+                _fmt(r["challenger"]) if r["challenger"] else "-",
+                "yes" if r["challenger_passes_screen"] else "no",
+                _fmt(r["consecutive_count"]),
+            ]
+        )
+    return rows
+
+
+def _build_markdown(date_str: str, result, comparison, governance) -> str:
     status = comparison.current_status
     proposed = result.proposed
     challengers = comparison.challengers
@@ -109,6 +157,7 @@ def _build_markdown(date_str: str, result, comparison) -> str:
 
     n_drop = int((~status["qualifies"]).sum())
     n_new = len(challengers)
+    n_replace = int((governance["recommended_action"] == "REPLACE").sum())
 
     lines = [
         f"# Focus-book refresh — {date_str}",
@@ -120,8 +169,10 @@ def _build_markdown(date_str: str, result, comparison) -> str:
         "auditable monthly trail.",
         "",
         f"- Lookback: {LOOKBACK_DAYS} days, top-N book size: {TOP_N}",
-        f"- Current members flagged DROP?: **{n_drop}/{len(status)}**",
+        f"- Current members flagged DROP? (this run alone): **{n_drop}/{len(status)}**",
         f"- Challengers that would newly enter: **{n_new}**",
+        f"- **Governance recommendation: {n_replace}/{len(governance)} members REPLACE** "
+        "(sustained, screen-passing drift across consecutive refreshes)",
         "",
         "Ranking key: formation-passes (desc), then median holdout p-value "
         "(asc), then full-window ADF p-value (asc). Structural near-twins and "
@@ -138,7 +189,20 @@ def _build_markdown(date_str: str, result, comparison) -> str:
         "",
         "`verdict = KEEP` when the member still lands in the proposed one-per-"
         "sector top-N AND still passes the screen; otherwise `DROP?` flags it "
-        "for human review.",
+        "for human review. (This column reacts to a SINGLE run — see the "
+        "governance recommendation below for the hysteresis-filtered action.)",
+        "",
+        "## Governance recommendation (hysteresis — the action to actually take)",
+        "",
+        "A member is only recommended REPLACE once the SAME challenger has "
+        "out-ranked it AND passed the screen for enough consecutive monthly "
+        "refreshes; otherwise WATCH (drift noted, not yet acted on) or KEEP. "
+        "This is what prevents churning the book on one noisy run.",
+        "",
+        _md_table(
+            ["pair", "sector", "action", "challenger", "challenger_passes_screen", "consecutive_runs"],
+            _governance_rows(governance),
+        ),
         "",
         "## Proposed book — what the fresh evidence would build today",
         "",
@@ -176,7 +240,7 @@ def _build_markdown(date_str: str, result, comparison) -> str:
     return "\n".join(lines)
 
 
-def _print_summary(result, comparison) -> None:
+def _print_summary(result, comparison, governance) -> None:
     status = comparison.current_status
     print("\n--- Current book: status vs fresh evidence ---")
     for _, r in status.iterrows():
@@ -212,6 +276,16 @@ def _print_summary(result, comparison) -> None:
                 f"passes_screen={'yes' if r['passes_screen'] else 'no'}"
             )
 
+    print("\n--- Governance recommendation (hysteresis-filtered ACTION) ---")
+    for _, r in governance.iterrows():
+        ch = f" vs {r['challenger']} (passes_screen={'yes' if r['challenger_passes_screen'] else 'no'}, "
+        ch += f"{int(r['consecutive_count'])} consecutive)" if r["challenger"] else ""
+        detail = ch if r["challenger"] else "  (still leads its sector — nobody out-ranked it)"
+        print(f"  [{r['recommended_action']:7s}] {r['label']:12s}{detail}")
+    n_replace = int((governance["recommended_action"] == "REPLACE").sum())
+    if n_replace == 0:
+        print("  => No REPLACE recommended: keep the book as-is this cycle.")
+
 
 def main() -> None:
     print("=== Pairs Trading Engine — focus-book refresh (persistence re-evaluation) ===\n")
@@ -231,18 +305,23 @@ def main() -> None:
         print(f"  dropped thin-history tickers: {dropped}")
     print(f"  {prices.shape[1]} tickers, {prices.shape[0]} trading days retained")
 
+    date_str = datetime.today().strftime("%Y-%m-%d")
     print(f"\n[2/3] Ranking {len(pairs)} candidate pairs by walk-forward persistence")
     result = rank_pairs(prices, pairs, top_n=TOP_N)
     comparison = compare_to_current_book(result)
+    history = _load_history(date_str)
+    governance = governance_actions(result, history=history)
     print(f"  {len(result.ranked)} pairs survived exclusions; proposed book has {len(result.proposed)} pairs")
-    _print_summary(result, comparison)
+    print(f"  loaded {len(history)} prior refresh record(s) for the governance streak")
+    _print_summary(result, comparison, governance)
 
-    print("\n[3/3] Writing dated proposal report to the vault")
-    date_str = datetime.today().strftime("%Y-%m-%d")
+    print("\n[3/3] Writing dated proposal report + updating history")
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
     report_path = REPORT_DIR / f"book_refresh_{date_str}.md"
-    report_path.write_text(_build_markdown(date_str, result, comparison), encoding="utf-8")
+    report_path.write_text(_build_markdown(date_str, result, comparison, governance), encoding="utf-8")
     print(f"  wrote {report_path}")
+    _save_history(history, build_history_record(result, date_str))
+    print(f"  updated {HISTORY_PATH}")
 
 
 if __name__ == "__main__":

@@ -248,6 +248,22 @@ py -m pytest
   member's evidence so membership drift is visible. It is a research
   watchlist — revisit membership when a fresh walk-forward run changes the
   ranking.
+- `screening/book_refresh.py` re-ranks the universe monthly and PROPOSES book
+  changes (never mutates `focus_book.py`). Three guards, added after the
+  2026-07-21 decision council, keep it from proposing false drift: (1) the
+  ranking's PRIMARY key is full-window cointegration — a pair that doesn't
+  cointegrate (no established mean-reversion to trade) can never outrank one
+  that does, regardless of walk-forward formation-pass count; persistence and
+  p-value are tie-breakers below that gate. (2) Stock-vs-own-sector-ETF pairs
+  (e.g. D/XLU — Dominion is a constituent of the utilities SPDR) are excluded
+  as disguised near-twins, same as share classes and duplicate-index ETFs.
+  (3) A hysteresis governance rule (`governance_actions`,
+  `GovernanceConfig.n_consecutive`, default 2): a member is only recommended
+  REPLACE once the SAME challenger has out-ranked it AND passed the FDR+OOS
+  screen for that many consecutive monthly refreshes; otherwise WATCH (drift
+  noted) or KEEP. `run_book_refresh.py` persists per-run history to
+  `book_refresh_reports/refresh_history.json` so streaks accumulate across
+  months, and writes a dated proposal report.
 
 ## Known limitations
 

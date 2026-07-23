@@ -48,8 +48,29 @@ NEAR_TWINS: frozenset[frozenset[str]] = frozenset(
     }
 )
 
+# Sector/index ETF tickers in the universe. A single stock paired with an ETF
+# that HOLDS it (e.g. D/XLU — Dominion is a constituent of the utilities SPDR)
+# is a stock-vs-own-index basis relationship: its cointegration is partly a
+# mechanical accounting identity (the ETF return already contains the stock),
+# it diversifies nothing, and it "breaks" on index rebalancing rather than
+# fundamentals. It is the same pathology NEAR_TWINS exists for — the council of
+# 2026-07-21 flagged that the frozenset above only catches ETF-vs-ETF and
+# share-class twins, missing stock-vs-own-sector-ETF — so it is excluded by the
+# same rule. See _is_stock_vs_own_sector_etf.
+SECTOR_ETF_TICKERS: frozenset[str] = frozenset(
+    {
+        "XLE", "XLF", "XLP", "XLI", "XLK", "XLV", "XLU", "SMH",  # sector SPDRs / semis
+        "SPY", "IVV", "VOO",                                      # broad-market index
+        "GLD", "SLV", "GDX", "IAU",                               # commodity/metals
+        "TLT", "IEF", "LQD", "HYG",                               # rates/credit
+    }
+)
+
 MIN_HALF_LIFE_DAYS = 5.0
 DEFAULT_TOP_N = 5
+# A pair must clear ADF at this level on the FULL window to count as genuinely
+# cointegrated for ranking. Matches the project-wide default significance.
+COINT_SIGNIFICANCE = 0.05
 
 
 @dataclass(frozen=True)
@@ -113,6 +134,25 @@ def _is_near_twin(ticker_a: str, ticker_b: str) -> bool:
     return frozenset({ticker_a, ticker_b}) in NEAR_TWINS
 
 
+def _is_stock_vs_own_sector_etf(
+    ticker_a: str, ticker_b: str, universe: dict[str, list[str]] | None = None
+) -> bool:
+    """True when one leg is a sector/index ETF and the other leg sits in that
+    ETF's own SECTOR_ETFS group — i.e. the ETF holds the stock (D/XLU). This is
+    a disguised near-twin: a stock-vs-own-index basis position whose spread is
+    mechanically tight rather than a genuine cross-firm relationship, so it is
+    excluded from any proposed book on the same structural grounds as the
+    explicit NEAR_TWINS."""
+    universe = SECTOR_ETFS if universe is None else universe
+    for etf, other in ((ticker_a, ticker_b), (ticker_b, ticker_a)):
+        if etf not in SECTOR_ETF_TICKERS:
+            continue
+        for members in universe.values():
+            if etf in members and other in members:
+                return True
+    return False
+
+
 def _aggregate_survival(survival: pd.DataFrame) -> pd.DataFrame:
     """Collapse pair_survival_study's (window, pair) rows to one row per pair:
     formation-passes (window count), holdout survivals, and median holdout
@@ -147,22 +187,29 @@ def build_ranking(
     mirrors the screen's `tradeable` flag (cointegrated + half-life band + FDR +
     out-of-sample validated).
 
-    Ranking key (persistence first, evidence-strength as tie-breakers):
+    Ranking key (cointegration GATE first, then persistence, then evidence):
+      0. is_cointegrated_full descending — a pair that does not cointegrate on
+         the full window (and thus has no established mean-reversion to trade)
+         can NEVER outrank one that does, regardless of formation-pass count.
+         This closes the artifact the 2026-07-21 council found: D/XLU (ADF
+         p=0.70, no half-life) was floating above DUK/SO (p=0.006) purely on
+         formation-passes + median-holdout-p, despite not cointegrating at all.
       1. n_formation_passes   descending — survived the most walk-forward windows
       2. median_holdout_pvalue ascending — held up hardest out of sample
       3. adf_pvalue           ascending — strongest full-window cointegration
 
-    Structural near-twins and pairs with half-life < 5 days are excluded before
-    ranking. `rank` is 1-based over the surviving candidates; `is_sector_leader`
-    marks the top-ranked pair in each sector bucket (the dedup survivor).
+    Structural near-twins, stock-vs-own-sector-ETF pairs, and pairs with
+    half-life < 5 days are excluded before ranking. `rank` is 1-based over the
+    surviving candidates; `is_sector_leader` marks the top-ranked pair in each
+    sector bucket (the dedup survivor).
     """
     if screen.empty:
         return pd.DataFrame(
             columns=[
                 "ticker_a", "ticker_b", "label", "sector_a", "sector_b", "sector_key",
                 "adf_pvalue", "half_life_days", "bh_significant", "oos_validated",
-                "passes_screen", "n_formation_passes", "n_holdout_survivals",
-                "median_holdout_pvalue", "rank", "is_sector_leader",
+                "passes_screen", "is_cointegrated_full", "n_formation_passes",
+                "n_holdout_survivals", "median_holdout_pvalue", "rank", "is_sector_leader",
             ]
         )
 
@@ -178,10 +225,21 @@ def build_ranking(
     # passes_screen mirrors the screen's own tradeable verdict when present.
     df["passes_screen"] = df["tradeable"].astype(bool) if "tradeable" in df.columns else False
 
-    # Exclusions: structural near-twins and sub-5-day half-lives. A NaN
-    # half-life (pair not cointegrated on the full window) is NOT excluded here
-    # — it simply carries no half-life evidence and sinks on the ranking key.
+    # Full-window cointegration gate: use the screen's own is_cointegrated flag
+    # when present, else fall back to the ADF p-value; require a computable
+    # half-life too (no half-life => no established mean-reversion to trade).
+    if "is_cointegrated" in df.columns:
+        coint = df["is_cointegrated"].astype(bool)
+    else:
+        coint = df["adf_pvalue"] < COINT_SIGNIFICANCE
+    df["is_cointegrated_full"] = coint & df["half_life_days"].notna()
+
+    # Exclusions: structural near-twins, stock-vs-own-sector-ETF basis pairs,
+    # and sub-5-day half-lives. A NaN half-life (pair not cointegrated on the
+    # full window) is NOT excluded here — it simply carries no half-life
+    # evidence and, now, sinks below every cointegrated pair on the ranking key.
     df = df[~df.apply(lambda r: _is_near_twin(r["ticker_a"], r["ticker_b"]), axis=1)]
+    df = df[~df.apply(lambda r: _is_stock_vs_own_sector_etf(r["ticker_a"], r["ticker_b"], universe), axis=1)]
     df = df[~(df["half_life_days"] < MIN_HALF_LIFE_DAYS)]
 
     df["label"] = df["ticker_a"] + "/" + df["ticker_b"]
@@ -190,8 +248,8 @@ def build_ranking(
     df["sector_key"] = df.apply(lambda r: _sector_key(r["ticker_a"], r["ticker_b"], mapping), axis=1)
 
     df = df.sort_values(
-        by=["n_formation_passes", "median_holdout_pvalue", "adf_pvalue"],
-        ascending=[False, True, True],
+        by=["is_cointegrated_full", "n_formation_passes", "median_holdout_pvalue", "adf_pvalue"],
+        ascending=[False, False, True, True],
         na_position="last",
     ).reset_index(drop=True)
     df["rank"] = df.index + 1
@@ -202,8 +260,8 @@ def build_ranking(
     columns = [
         "ticker_a", "ticker_b", "label", "sector_a", "sector_b", "sector_key",
         "adf_pvalue", "half_life_days", "bh_significant", "oos_validated",
-        "passes_screen", "n_formation_passes", "n_holdout_survivals",
-        "median_holdout_pvalue", "rank", "is_sector_leader",
+        "passes_screen", "is_cointegrated_full", "n_formation_passes",
+        "n_holdout_survivals", "median_holdout_pvalue", "rank", "is_sector_leader",
     ]
     return df[columns]
 
@@ -332,3 +390,114 @@ def compare_to_current_book(
         challengers = proposed[challenger_mask][challenger_cols].reset_index(drop=True)
 
     return BookComparison(current_status=current_status, challengers=challengers)
+
+
+@dataclass(frozen=True)
+class GovernanceConfig:
+    """Hysteresis rule for acting on drift (2026-07-21 council recommendation).
+
+    A sitting member is only recommended for REPLACE once the SAME challenger
+    has out-ranked it (taken its sector slot in the proposed book) for
+    `n_consecutive` monthly refreshes in a row AND that challenger passes the
+    strict FDR+OOS screen. This prevents churning the book on a single noisy
+    refresh — the whole reason a fixed book exists — while still surfacing
+    genuine, sustained, screen-passing drift.
+    """
+
+    n_consecutive: int = 2
+
+
+def _member_challenger(member: FocusPair, result: RefreshResult) -> tuple[str | None, bool]:
+    """The proposed sector-leader that displaced `member` this run, plus whether
+    that challenger passes the screen. Returns (None, False) when the member
+    still leads its own sector bucket in the proposed book (nobody out-ranked
+    it), or when it fell out of the top-N with no same-sector challenger."""
+    member_key = _canonical(member.ticker_a, member.ticker_b)
+    proposed = result.proposed
+    if proposed.empty:
+        return None, False
+    for _, row in proposed.iterrows():
+        if _canonical(row["ticker_a"], row["ticker_b"]) == member_key:
+            return None, False  # member still holds its slot — not out-ranked
+    for _, row in proposed.iterrows():
+        if member.sector in str(row["sector_key"]).split("|"):
+            return str(row["label"]), bool(row["passes_screen"])
+    return None, False
+
+
+def governance_actions(
+    result: RefreshResult,
+    history: list[dict] | None = None,
+    current_book: list[FocusPair] | None = None,
+    config: GovernanceConfig | None = None,
+) -> pd.DataFrame:
+    """Apply the hysteresis rule to each sitting member given prior refresh runs.
+
+    `history` is the list of prior `build_history_record` dicts (oldest first;
+    it must NOT already contain the current run). Returns one row per member:
+    recommended_action in {KEEP, WATCH, REPLACE}, the current challenger (if
+    any), whether it passes the screen, and the consecutive-run count backing a
+    REPLACE. A member still leading its sector is KEEP; an out-ranked member is
+    WATCH until the same screen-passing challenger has beaten it for
+    `n_consecutive` runs, at which point it becomes REPLACE.
+    """
+    history = history or []
+    current_book = FOCUS_BOOK if current_book is None else current_book
+    config = config or GovernanceConfig()
+
+    rows = []
+    for member in current_book:
+        challenger, passes = _member_challenger(member, result)
+        if challenger is None:
+            rows.append(
+                {
+                    "label": member.label, "sector": member.sector,
+                    "recommended_action": "KEEP", "challenger": None,
+                    "challenger_passes_screen": False, "consecutive_count": 0,
+                }
+            )
+            continue
+
+        # This run contributes to the streak only if the challenger passes the
+        # screen; then count back over prior runs while the SAME challenger kept
+        # winning AND passing. A gap (different challenger, or one that failed
+        # the screen) resets the streak.
+        streak = 1 if passes else 0
+        if passes:
+            for record in reversed(history):
+                prior = record.get("members", {}).get(member.label)
+                if prior and prior.get("challenger") == challenger and prior.get(
+                    "challenger_passes_screen"
+                ):
+                    streak += 1
+                else:
+                    break
+        action = "REPLACE" if streak >= config.n_consecutive else "WATCH"
+        rows.append(
+            {
+                "label": member.label, "sector": member.sector,
+                "recommended_action": action, "challenger": challenger,
+                "challenger_passes_screen": passes, "consecutive_count": streak,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def build_history_record(
+    result: RefreshResult,
+    date_str: str,
+    current_book: list[FocusPair] | None = None,
+) -> dict:
+    """The persistable record of THIS run for the hysteresis history file: per
+    member, which challenger (if any) out-ranked it and whether that challenger
+    passed the screen. Appended to the history JSON so the next monthly run can
+    measure consecutive-run streaks."""
+    current_book = FOCUS_BOOK if current_book is None else current_book
+    members = {}
+    for member in current_book:
+        challenger, passes = _member_challenger(member, result)
+        members[member.label] = {
+            "challenger": challenger,
+            "challenger_passes_screen": bool(passes),
+        }
+    return {"date": date_str, "members": members}

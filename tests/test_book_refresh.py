@@ -13,29 +13,46 @@ import pandas as pd
 
 from screening.book_refresh import (
     BookComparison,
+    GovernanceConfig,
     RefreshResult,
+    build_history_record,
     build_ranking,
     compare_to_current_book,
     dedupe_one_per_sector,
+    governance_actions,
     propose_book,
     rank_pairs,
 )
 from screening.focus_book import FocusPair
 
+EMPTY_SURVIVAL = pd.DataFrame(columns=["ticker_a", "ticker_b", "holdout_pvalue", "survived"])
+
 # ------------------------------------------------------------ hand-built frames
 
 
-def _screen_row(ticker_a, ticker_b, adf_pvalue, half_life, tradeable=True):
-    """One screen_universe-shaped row."""
+def _screen_row(ticker_a, ticker_b, adf_pvalue, half_life, tradeable=True, is_cointegrated=None):
+    """One screen_universe-shaped row. `is_cointegrated` defaults to the ADF
+    verdict at p<0.05 (what the real screen would produce), but can be forced —
+    e.g. a pair with a strong-looking p-value that still isn't cointegrated."""
+    if is_cointegrated is None:
+        is_cointegrated = adf_pvalue < 0.05
     return {
         "ticker_a": ticker_a,
         "ticker_b": ticker_b,
         "adf_pvalue": adf_pvalue,
         "half_life_days": half_life,
+        "is_cointegrated": is_cointegrated,
         "bh_significant": tradeable,
         "oos_validated": tradeable,
         "tradeable": tradeable,
     }
+
+
+def _mk_result(proposed_rows):
+    """A RefreshResult with a minimal proposed frame (ranked == proposed) for
+    governance tests. Each row needs ticker_a/ticker_b/label/sector_key/passes_screen."""
+    proposed = pd.DataFrame(proposed_rows)
+    return RefreshResult(ranked=proposed, proposed=proposed, top_n=len(proposed_rows))
 
 
 def _survival_rows(ticker_a, ticker_b, holdout_pvalues, survived):
@@ -136,8 +153,46 @@ def test_short_half_life_excluded():
             _screen_row("DUK", "SO", adf_pvalue=0.01, half_life=18.0),   # kept
         ]
     )
-    ranked = build_ranking(screen, pd.DataFrame(columns=["ticker_a", "ticker_b", "holdout_pvalue", "survived"]))
+    ranked = build_ranking(screen, EMPTY_SURVIVAL)
     assert list(ranked["label"]) == ["DUK/SO"]
+
+
+def test_stock_vs_own_sector_etf_excluded():
+    """D/XLU (Dominion is a constituent of the utilities SPDR) is a disguised
+    near-twin and must be excluded, while the genuine two-name DUK/SO stays.
+    This is the exact case the 2026-07-21 council flagged."""
+    screen = pd.DataFrame(
+        [
+            _screen_row("D", "XLU", adf_pvalue=0.70, half_life=None),  # stock vs own sector ETF
+            _screen_row("DUK", "SO", adf_pvalue=0.006, half_life=18.0),
+        ]
+    )
+    ranked = build_ranking(screen, EMPTY_SURVIVAL)
+    labels = set(ranked["label"])
+    assert "D/XLU" not in labels
+    assert "DUK/SO" in labels
+
+
+def test_cointegration_gate_is_primary_sort_key():
+    """A pair that does NOT cointegrate on the full window cannot outrank one
+    that does, even with more formation passes — the artifact the council found
+    (D/XLU floating above DUK/SO on formation-count despite ADF p=0.70)."""
+    screen = pd.DataFrame(
+        [
+            # Strong persistence but not cointegrated full-window, no half-life.
+            _screen_row("COP", "SLB", adf_pvalue=0.70, half_life=None, is_cointegrated=False),
+            # Fewer formation passes but genuinely cointegrated.
+            _screen_row("DUK", "SO", adf_pvalue=0.006, half_life=18.0),
+        ]
+    )
+    survival = pd.DataFrame(
+        _survival_rows("COP", "SLB", [0.10, 0.10, 0.10, 0.10], [True, True, True, True])  # 4 passes
+        + _survival_rows("DUK", "SO", [0.20, 0.20], [True, True])                          # 2 passes
+    )
+    ranked = build_ranking(screen, survival)
+    assert list(ranked["label"]) == ["DUK/SO", "COP/SLB"]
+    assert bool(ranked.loc[ranked["label"] == "DUK/SO", "is_cointegrated_full"].iloc[0]) is True
+    assert bool(ranked.loc[ranked["label"] == "COP/SLB", "is_cointegrated_full"].iloc[0]) is False
 
 
 # ------------------------------------------------------------ dedup / propose
@@ -230,3 +285,82 @@ def test_rank_pairs_end_to_end_on_fixture(sector_universe_fixture):
     # Proposed book is deduped one-per-sector and never exceeds the requested N.
     assert len(result.proposed) <= 5
     assert result.proposed["sector_key"].is_unique
+
+
+# ------------------------------------------------------------ governance (hysteresis)
+
+
+def _proposed_row(ticker_a, ticker_b, label, sector_key, passes_screen, rank=1):
+    return {
+        "ticker_a": ticker_a, "ticker_b": ticker_b, "label": label,
+        "sector_key": sector_key, "passes_screen": passes_screen, "rank": rank,
+    }
+
+
+def test_governance_keep_when_member_still_leads_sector():
+    # DUK/SO is itself the proposed utilities leader -> nobody out-ranked it.
+    result = _mk_result([_proposed_row("DUK", "SO", "DUK/SO", "utilities", passes_screen=False)])
+    book = [FocusPair("DUK", "SO", "utilities", "x")]
+    acts = governance_actions(result, history=[], current_book=book).set_index("label")
+    assert acts.loc["DUK/SO", "recommended_action"] == "KEEP"
+    assert acts.loc["DUK/SO", "challenger"] is None
+
+
+def test_governance_watch_when_challenger_fails_screen():
+    # D/XLU out-ranks DUK/SO but does NOT pass the screen -> WATCH, never REPLACE,
+    # no matter the history. This is exactly the live 2026-07-21 situation.
+    result = _mk_result([_proposed_row("D", "XLU", "D/XLU", "utilities", passes_screen=False)])
+    book = [FocusPair("DUK", "SO", "utilities", "x")]
+    history = [
+        {"date": "2026-06-20", "members": {"DUK/SO": {"challenger": "D/XLU", "challenger_passes_screen": False}}},
+        {"date": "2026-05-20", "members": {"DUK/SO": {"challenger": "D/XLU", "challenger_passes_screen": False}}},
+    ]
+    acts = governance_actions(result, history=history, current_book=book).set_index("label")
+    assert acts.loc["DUK/SO", "recommended_action"] == "WATCH"
+    assert acts.loc["DUK/SO", "challenger"] == "D/XLU"
+    assert int(acts.loc["DUK/SO", "consecutive_count"]) == 0
+
+
+def test_governance_replace_after_n_consecutive_screen_passing():
+    # Same screen-passing challenger this run + one prior run = 2 consecutive
+    # -> REPLACE at the default n_consecutive=2.
+    result = _mk_result([_proposed_row("AEP", "NEE", "AEP/NEE", "utilities", passes_screen=True)])
+    book = [FocusPair("DUK", "SO", "utilities", "x")]
+    history = [
+        {"date": "2026-06-20", "members": {"DUK/SO": {"challenger": "AEP/NEE", "challenger_passes_screen": True}}},
+    ]
+    acts = governance_actions(result, history=history, current_book=book).set_index("label")
+    assert acts.loc["DUK/SO", "recommended_action"] == "REPLACE"
+    assert int(acts.loc["DUK/SO", "consecutive_count"]) == 2
+
+
+def test_governance_streak_resets_on_different_challenger():
+    # This run's challenger passes, but the prior run's challenger was different
+    # -> streak is 1, below n_consecutive=2 -> WATCH.
+    result = _mk_result([_proposed_row("AEP", "NEE", "AEP/NEE", "utilities", passes_screen=True)])
+    book = [FocusPair("DUK", "SO", "utilities", "x")]
+    history = [
+        {"date": "2026-06-20", "members": {"DUK/SO": {"challenger": "D/XLU", "challenger_passes_screen": True}}},
+    ]
+    acts = governance_actions(result, history=history, current_book=book).set_index("label")
+    assert acts.loc["DUK/SO", "recommended_action"] == "WATCH"
+    assert int(acts.loc["DUK/SO", "consecutive_count"]) == 1
+
+
+def test_governance_respects_custom_n_consecutive():
+    result = _mk_result([_proposed_row("AEP", "NEE", "AEP/NEE", "utilities", passes_screen=True)])
+    book = [FocusPair("DUK", "SO", "utilities", "x")]
+    # No history, single run: streak 1. n_consecutive=1 -> REPLACE; default 2 -> WATCH.
+    strict = governance_actions(result, history=[], current_book=book, config=GovernanceConfig(1))
+    assert strict.set_index("label").loc["DUK/SO", "recommended_action"] == "REPLACE"
+    lenient = governance_actions(result, history=[], current_book=book)
+    assert lenient.set_index("label").loc["DUK/SO", "recommended_action"] == "WATCH"
+
+
+def test_build_history_record_captures_challenger_and_screen_flag():
+    result = _mk_result([_proposed_row("D", "XLU", "D/XLU", "utilities", passes_screen=False)])
+    book = [FocusPair("DUK", "SO", "utilities", "x")]
+    record = build_history_record(result, "2026-07-21", current_book=book)
+    assert record["date"] == "2026-07-21"
+    assert record["members"]["DUK/SO"]["challenger"] == "D/XLU"
+    assert record["members"]["DUK/SO"]["challenger_passes_screen"] is False
