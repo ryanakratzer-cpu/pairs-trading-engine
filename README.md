@@ -59,6 +59,9 @@ run_focus_book.py            track the fixed focus book as one min-variance-weig
                              (--review prints each member's evidence)
 run_book_refresh.py          monthly persistence re-ranking; writes a dated proposal report
                              to ../book_refresh_reports/ (proposal only, never edits the book)
+dashboard.py                 Streamlit + Plotly UI: pick a pair + lookback, see ADF p /
+                             hedge ratio / Z-score / net-P&L cards, a Z-score timeline with
+                             entry/exit guides, and open-trade + signal tables
 run_live_monitor.py          REAL-TIME monitor: Yahoo websocket streaming (default) with polling
                              fallback, live z-score + signal state, auto-refreshing dashboard
 docs/                        published interactive dashboards (GitHub Pages)
@@ -118,6 +121,15 @@ from a branch -> `main` / `docs`); they then render at
 `https://ryanakratzer-cpu.github.io/pairs-trading-engine/`. Regenerate the
 dashboards any time with `py run_montecarlo.py GDX GLD` and copy the
 refreshed `outputs/interactive_*.html` files into `docs/`.
+
+Interactive dashboard (Streamlit + Plotly — pick a pair and lookback in the
+sidebar; metric cards, Z-score chart with entry/exit guides, trade/signal
+tables):
+
+```
+py -m pip install -r requirements.txt
+py -m streamlit run dashboard.py
+```
 
 Run the tests:
 

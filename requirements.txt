@@ -6,3 +6,4 @@ matplotlib>=3.9
 yfinance>=0.2.40
 pytest>=8.0
 plotly>=5.20
+streamlit>=1.30
