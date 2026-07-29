@@ -702,3 +702,28 @@ def test_event_gate_blocks_new_entries_on_fomc_blackout():
     assert ungated["event"].iloc[-1] == "ENTER_SHORT_SPREAD"
     assert gated["event"].iloc[-1] == "NO_POSITION"
     assert int(gated["position"].iloc[-1]) == 0
+
+
+def test_record_session_runs_the_gated_production_path(tmp_path, close_panel, ohlc_panel, session_dates):
+    """REGRESSION: every other test passes apply_event_gate=False, so the GATED
+    branch — the one production actually uses — was never executed, and a missing
+    `event_exclusion_mask` import survived a green suite and only blew up live
+    with a NameError. This test exercises record_session with the gate ON.
+    """
+    path = tmp_path / "perf.csv"
+    n = record_session(
+        [("AAA", "BBB")],
+        apply_event_gate=True,  # the production default; must not raise
+        as_of=session_dates[60].strftime("%Y-%m-%d"),
+        notional=NOTIONAL,
+        path=path,
+        signal_config=SignalConfig(zscore_window=ZSCORE_WINDOW),
+        price_fetcher=_close_fetcher(close_panel),
+        ohlc_fetcher=_ohlc_fetcher(ohlc_panel),
+        verbose=False,
+    )
+    assert n == 1
+    row = pd.read_csv(path).iloc[0]
+    assert list(pd.read_csv(path).columns) == PERFORMANCE_COLUMNS
+    # Gated or not, a recorded position is still one of the three valid states.
+    assert int(row["position"]) in (-1, 0, 1)

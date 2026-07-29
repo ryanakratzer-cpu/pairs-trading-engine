@@ -68,6 +68,7 @@ import pandas as pd
 
 from data.loader import fetch_price_history
 from screening.cointegration import test_pair_cointegration
+from screening.events import event_exclusion_mask
 from signals.spread import SignalConfig, build_spread, generate_signals, rolling_zscore
 
 DEFAULT_PERFORMANCE_PATH = Path(__file__).resolve().parent.parent / "outputs" / "daily_performance.csv"
@@ -213,7 +214,20 @@ def record_session(
 
     tickers = sorted({t for pair in pairs for t in pair} | {benchmark})
 
-    closes = price_fetcher(tickers, start=start, end=end)
+    # BYPASS THE CSV CACHE for the close panel. data/loader.py caches on
+    # (tickers, start, end), and this window always extends to `requested` — so
+    # a run that happens before the provider publishes that day's daily bar
+    # writes an INCOMPLETE panel to cache, and every later run reuses it and can
+    # never see the session. Observed live 2026-07-29: the 16:30 scheduled run
+    # cached a panel ending 07-28, so re-runs at 18:09+ still reported "no pair
+    # had enough data" even though the bar was available. The ohlc fetcher is
+    # uncached and did see it, which is exactly how the split was diagnosed.
+    # Injected test fetchers accept **kwargs, so this stays test-friendly.
+    try:
+        closes = price_fetcher(tickers, start=start, end=end, use_cache=False)
+    except TypeError:
+        # A custom fetcher that doesn't take use_cache: fall back rather than fail.
+        closes = price_fetcher(tickers, start=start, end=end)
     ohlc = ohlc_fetcher(tickers, start=start, end=end)
 
     opens_all = _field(ohlc, "Open")
@@ -258,7 +272,14 @@ def record_session(
 
     if not rows:
         if verbose:
-            print("[daily_performance] no pair had enough data to record.")
+            # Say WHY, and do not let the caller print "already recorded": a
+            # data gap and an idempotent no-op both return 0 but mean opposite
+            # things, and conflating them hid a real bug for a full session.
+            print(
+                f"[daily_performance] DATA GAP - session {session_date.date()} resolved but no "
+                f"pair could be priced from it (missing close/open bar or too little history). "
+                f"NOTHING was recorded; this is NOT an idempotent no-op."
+            )
         return 0
 
     return _append_rows(pd.DataFrame(rows), path)
