@@ -179,6 +179,7 @@ def record_session(
     price_fetcher: Callable[..., pd.DataFrame] = fetch_price_history,
     ohlc_fetcher: Callable[..., pd.DataFrame] = fetch_session_ohlc,
     verbose: bool = True,
+    apply_event_gate: bool = True,
 ) -> int:
     """Record one session's decision + realized outcome for each pair.
 
@@ -250,6 +251,7 @@ def record_session(
             signal_config=signal_config,
             notional=notional,
             spy_return_pct=spy_return_pct,
+            apply_event_gate=apply_event_gate,
         )
         if row is not None:
             rows.append(row)
@@ -302,6 +304,7 @@ def _session_row(
     signal_config: SignalConfig,
     notional: float,
     spy_return_pct: float,
+    apply_event_gate: bool = True,
 ) -> dict | None:
     """Build one CSV row, or None when the pair lacks usable data."""
     for frame in (closes, opens_all, closes_all):
@@ -325,7 +328,16 @@ def _session_row(
 
     spread = build_spread(history[ticker_a], history[ticker_b], hedge_ratio)
     zscore = rolling_zscore(spread, signal_config.zscore_window)
-    signals = generate_signals(zscore, signal_config)
+    # GATED, not raw: the tracker must record what the REAL engine would do, and
+    # the real engine refuses new entries inside an FOMC/election blackout
+    # (screening/events.py), exactly as run_screen.py and run_focus_book.py do.
+    # Recording ungated signals would log entries the live book would never take
+    # and quietly inflate the track record with trades that never happen. The
+    # mask gates NEW entries only; an already-open position still exits/stops.
+    # apply_event_gate=False is for tests that isolate other behaviour on
+    # synthetic date ranges; production always records the GATED decision.
+    entries_allowed = event_exclusion_mask(zscore.index) if apply_event_gate else None
+    signals = generate_signals(zscore, signal_config, tradeable=entries_allowed)
     latest = signals.iloc[-1]
     close_z = float(latest["zscore"]) if pd.notna(latest["zscore"]) else np.nan
     position = int(latest["position"])

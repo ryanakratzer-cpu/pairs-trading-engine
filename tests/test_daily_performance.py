@@ -91,6 +91,10 @@ def _forbidden_fetcher(tickers, start, end, **kwargs):
 def _record(path, close_panel, ohlc_panel, as_of, pairs=None):
     return record_session(
         pairs or [("AAA", "BBB")],
+        # These tests run on synthetic date ranges and isolate session-recording
+        # mechanics; the FOMC/election gate is pinned separately below so the
+        # mask can't decide the signal here. Production defaults to gated.
+        apply_event_gate=False,
         as_of=as_of,
         notional=NOTIONAL,
         path=path,
@@ -264,6 +268,7 @@ def test_record_session_falls_back_to_last_completed_session(
 
     n = record_session(
         [("AAA", "BBB")],
+        apply_event_gate=False,
         as_of=requested.strftime("%Y-%m-%d"),
         notional=NOTIONAL,
         path=path,
@@ -668,3 +673,32 @@ def test_performance_summary_missing_file(tmp_path):
     assert s["cumulative_pnl_usd"] == 0.0
     assert s["cumulative_strategy_return_pct"] == 0.0
     assert s["sharpe_ratio"] is None
+
+
+def test_event_gate_blocks_new_entries_on_fomc_blackout():
+    """REGRESSION (2026-07-29): the tracker generated signals WITHOUT the
+    event-exclusion gate, so it would log entries on FOMC blackout dates that
+    the real gated engine (run_screen.py / run_focus_book.py) refuses to take —
+    silently inflating the multi-day track record with trades that never happen.
+
+    Pins the gate directly: on a blackout date a fresh |z| past the entry band
+    must NOT produce an entry, while the same z ungated must.
+    """
+    from screening.events import FOMC_DECISION_DATES, event_exclusion_mask
+    from signals.spread import generate_signals
+
+    blackout = pd.Timestamp(FOMC_DECISION_DATES[-1])
+    index = pd.bdate_range(blackout - pd.Timedelta(days=10), blackout)
+    # Flat, then a dislocation past the +2.0 entry band on the blackout bar.
+    z = pd.Series(0.0, index=index)
+    z.iloc[-1] = 2.5
+
+    gate = event_exclusion_mask(index)
+    assert not bool(gate.loc[blackout]), "the blackout date must be gated off"
+
+    gated = generate_signals(z, SignalConfig(), tradeable=gate)
+    ungated = generate_signals(z, SignalConfig())
+
+    assert ungated["event"].iloc[-1] == "ENTER_SHORT_SPREAD"
+    assert gated["event"].iloc[-1] == "NO_POSITION"
+    assert int(gated["position"].iloc[-1]) == 0
