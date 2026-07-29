@@ -59,9 +59,16 @@ run_focus_book.py            track the fixed focus book as one min-variance-weig
                              (--review prints each member's evidence)
 run_book_refresh.py          monthly persistence re-ranking; writes a dated proposal report
                              to ../book_refresh_reports/ (proposal only, never edits the book)
-dashboard.py                 Streamlit + Plotly UI: pick a pair + lookback, see ADF p /
-                             hedge ratio / Z-score / net-P&L cards, a Z-score timeline with
-                             entry/exit guides, and open-trade + signal tables
+dashboard.py                 Streamlit + Plotly UI, two tabs: "Pair analysis" (ADF p / hedge
+                             ratio / Z-score / net-P&L + Sharpe/vol/profit-factor/drawdown/
+                             half-life, Z-score timeline, trade+signal tables) and
+                             "Track record (multi-day)" (accumulating session log vs SPY)
+reporting/daily_performance.py  persistent multi-day tracker: append-only session log,
+                             grade-on-read of past decisions, cumulative track record
+reporting/decision_grader.py grades historical buy/sell decisions two ways — by OUTCOME
+                             (P&L net of costs) and by THESIS (did the spread revert)
+run_daily_tracker.py         record today's session, grade older ones, print the track record
+run_grade_decisions.py       historical decision hit-rate report for the focus book
 run_live_monitor.py          REAL-TIME monitor: Yahoo websocket streaming (default) with polling
                              fallback, live z-score + signal state, auto-refreshing dashboard
 docs/                        published interactive dashboards (GitHub Pages)
@@ -276,6 +283,30 @@ py -m pytest
   noted) or KEEP. `run_book_refresh.py` persists per-run history to
   `book_refresh_reports/refresh_history.json` so streaks accumulate across
   months, and writes a dated proposal report.
+
+- `reporting/daily_performance.py` accumulates a MULTI-DAY track record:
+  `run_daily_tracker.py` appends one immutable row per session per pair to
+  `outputs/daily_performance.csv` (idempotent per date+pair, so a daily
+  scheduled run is safe to re-fire), and grades older sessions ON READ — never
+  mutating the log — so verdicts can't be quietly rewritten and improve as more
+  outcome data arrives. **Two distinct return columns, and the distinction
+  matters**: `strategy_return_pct` is position-aware and is exactly 0 on a flat
+  session (it is the ONLY column benchmarked against SPY), while
+  `spread_move_pct` is a position-agnostic diagnostic of what the spread did
+  regardless of whether we held it. Conflating them is not hypothetical — the
+  first build did, and reported "beat the market 1/1 days (100%)" on a session
+  whose P&L was −$62. The summary also reports active vs flat session counts,
+  because a record dominated by flat days must say so rather than implying the
+  strategy was working.
+- `reporting/decision_grader.py` answers "when it said buy/sell, was it right?"
+  by grading every historical decision two ways: OUTCOME (did the round trip
+  make money net of costs) and THESIS (did the spread actually mean-revert).
+  Disagreement between the lenses is the diagnostic — thesis-right/outcome-wrong
+  points at costs or sizing, thesis-wrong points at the model. First live run on
+  the focus book (55 round trips, ~2.5y, in-sample): 42% outcome hit-rate, 86%
+  raw thesis rate that falls to 41% once artifacts are discounted, 0 of 22
+  stop-losses justified, +$118 total on $100k. Treat as diagnostics, not
+  evidence: it is in-sample and circular (the book was selected on this history).
 
 ## Known limitations
 
