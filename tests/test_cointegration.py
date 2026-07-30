@@ -3,7 +3,13 @@ import pandas as pd
 import pytest
 from statsmodels.tsa.stattools import coint
 
-from screening.cointegration import _benjamini_hochberg, compute_half_life, screen_universe, validate_out_of_sample
+from screening.cointegration import (
+    _benjamini_hochberg,
+    compute_half_life,
+    is_market_neutral,
+    screen_universe,
+    validate_out_of_sample,
+)
 from screening.cointegration import test_pair_cointegration as engle_granger_test
 
 
@@ -183,3 +189,82 @@ def test_screen_universe_out_of_sample_validation_is_opt_in_and_never_loosens_tr
     tradeable_with = set(zip(with_oos.loc[with_oos["tradeable"], "ticker_a"], with_oos.loc[with_oos["tradeable"], "ticker_b"]))
     tradeable_without = set(zip(without_oos.loc[without_oos["tradeable"], "ticker_a"], without_oos.loc[without_oos["tradeable"], "ticker_b"]))
     assert tradeable_with <= tradeable_without
+
+
+def test_eg_pvalue_is_populated_and_never_looser_than_naive_adf(cointegrated_pair_prices):
+    """The naive ADF p-value on ESTIMATED residuals is biased toward
+    "cointegrated" because OLS picks the beta that makes the residual look as
+    stationary as possible. The proper Engle-Granger/MacKinnon p-value corrects
+    for that, so it must be >= the naive one, and it must match statsmodels'
+    coint() run on the same log series in the same A~B order.
+    """
+    price_a, price_b, _hedge_ratio_true, _theta = cointegrated_pair_prices
+    result = engle_granger_test(price_a, price_b, ticker_a="A", ticker_b="B")
+
+    assert result.eg_pvalue is not None
+    assert result.eg_pvalue >= result.adf_pvalue
+    _stat, expected_eg_pvalue, *_ = coint(np.log(price_a), np.log(price_b))
+    assert result.eg_pvalue == pytest.approx(expected_eg_pvalue)
+
+
+def test_eg_disagrees_flags_the_cost_pep_style_borderline_pair(eg_disagreement_pair_prices):
+    """COST/PEP live: our ADF p-value 0.0393 (cointegrated) vs proper EG
+    0.1207 (NOT cointegrated). eg_disagrees must surface exactly that case —
+    and is_cointegrated must be LEFT ALONE, since this fix is additive.
+    """
+    price_a, price_b = eg_disagreement_pair_prices
+    result = engle_granger_test(price_a, price_b, ticker_a="A", ticker_b="B")
+
+    assert result.adf_pvalue < 0.05 <= result.eg_pvalue
+    assert result.eg_disagrees
+    assert result.is_cointegrated  # unchanged semantics: still driven by adf_pvalue
+
+
+def test_eg_disagrees_is_false_when_both_tests_agree(cointegrated_pair_prices, non_cointegrated_pair_prices):
+    strong_a, strong_b, _hr, _theta = cointegrated_pair_prices
+    strong = engle_granger_test(strong_a, strong_b)
+    assert strong.adf_pvalue < 0.05 and strong.eg_pvalue < 0.05
+    assert not strong.eg_disagrees
+
+    weak_a, weak_b = non_cointegrated_pair_prices
+    weak = engle_granger_test(weak_a, weak_b)
+    assert not weak.is_cointegrated
+    assert not weak.eg_disagrees  # only fires when OUR test claims cointegration
+
+
+def test_is_market_neutral_requires_a_positive_hedge_ratio():
+    # beta > 0: short spread => short A, long beta*B — the legs offset.
+    assert is_market_neutral(0.8)
+    # beta < 0: the hedge leg flips sign, so short spread => short A AND short
+    # B — net directional, with none of the relative-value protection.
+    assert not is_market_neutral(-0.5)
+    assert not is_market_neutral(0.0)
+
+
+def test_screen_universe_carries_eg_and_market_neutral_columns(sector_universe_fixture):
+    panel, injected_pair = sector_universe_fixture
+    pairs = [injected_pair, ("CCC", "DDD")]
+    results = screen_universe(panel, pairs, min_half_life_days=1.0, max_half_life_days=60.0)
+
+    for column in ("eg_pvalue", "eg_disagrees", "market_neutral"):
+        assert column in results.columns
+
+    assert (results["eg_pvalue"] >= results["adf_pvalue"]).all()
+    assert results["eg_disagrees"].dtype == bool
+    # market_neutral must agree with the sign of each row's own hedge ratio.
+    assert (results["market_neutral"] == (results["hedge_ratio"] > 0)).all()
+
+
+def test_screen_universe_flags_but_does_not_drop_a_negative_beta_pair(negative_beta_pair_panel):
+    """The negative-beta pair must still appear in the screen (auditable) with
+    market_neutral=False, and `tradeable` must NOT be silently re-gated on it —
+    the backtester's require_positive_hedge_ratio flag is the enforcement point.
+    """
+    panel, pair = negative_beta_pair_panel
+    results = screen_universe(panel, [pair], min_half_life_days=1.0, max_half_life_days=60.0)
+
+    assert len(results) == 1
+    row = results.iloc[0]
+    assert row["hedge_ratio"] < 0
+    assert not row["market_neutral"]
+    assert row["is_cointegrated"]

@@ -342,3 +342,71 @@ def test_kalman_innovation_mode_backtests_end_to_end(sector_universe_fixture):
     final_equity = result["equity_curve"].iloc[-1]
     total_pnl = result["trade_log"]["pnl"].sum()
     assert final_equity == pytest.approx(config.initial_capital + total_pnl)
+
+
+def test_negative_hedge_ratio_pair_is_blocked_by_default_and_trades_when_flag_is_off(
+    negative_beta_pair_panel,
+):
+    """With spread = log(A) - beta*log(B), a negative beta flips the hedge leg's
+    sign so both legs are same-signed: net directional, not market-neutral
+    (live: ABT/MRK beta=-0.578 => net -$15,800 on a $10k notional). The
+    require_positive_hedge_ratio gate (ON by default) must produce zero trades
+    on such a pair, while the SAME pair with the flag off still trades — proving
+    the gate, not a lack of signal, is what stopped it.
+    """
+    panel, pair = negative_beta_pair_panel
+
+    gated = PairBacktester(
+        PairBacktestConfig(signal_config=SignalConfig(require_positive_hedge_ratio=True))
+    ).run(panel, [pair])
+    ungated = PairBacktester(
+        PairBacktestConfig(signal_config=SignalConfig(require_positive_hedge_ratio=False))
+    ).run(panel, [pair])
+
+    assert gated["trade_log"].empty
+    assert len(ungated["trade_log"]) > 0
+
+    # The gate works by zeroing the entry-tradeability mask, not by dropping the
+    # pair — it stays in per_pair so the block is auditable.
+    assert pair in gated["per_pair"]
+    assert not gated["per_pair"][pair]["tradeable"].any()
+
+
+def test_positive_hedge_ratio_pair_is_unaffected_by_the_market_neutrality_gate(
+    sector_universe_fixture,
+):
+    panel, pair = sector_universe_fixture
+
+    with_gate = PairBacktester(
+        PairBacktestConfig(signal_config=SignalConfig(require_positive_hedge_ratio=True))
+    ).run(panel, [pair])
+    without_gate = PairBacktester(
+        PairBacktestConfig(signal_config=SignalConfig(require_positive_hedge_ratio=False))
+    ).run(panel, [pair])
+
+    pd.testing.assert_series_equal(
+        with_gate["per_pair"][pair]["tradeable"], without_gate["per_pair"][pair]["tradeable"]
+    )
+    assert len(with_gate["trade_log"]) == len(without_gate["trade_log"])
+
+
+def test_negative_beta_gate_is_causal(negative_beta_pair_panel):
+    """The negative-beta gate must use the CAUSAL per-bar hedge ratio, never a
+    full-series fit. Perturbing prices only AFTER a cutoff must not change any
+    trade that closed on or before it — the same guarantee
+    test_backtest_equity_is_causal_to_future_prices makes for the equity curve.
+    """
+    panel, pair = negative_beta_pair_panel
+    config = PairBacktestConfig(recheck_window_days=100, recheck_freq_days=30)
+
+    base = PairBacktester(config).run(panel, [pair])
+    cutoff = panel.index[int(len(panel) * 0.7)]
+
+    shocked = panel.copy()
+    shocked.loc[shocked.index > cutoff] *= 1.35
+
+    after = PairBacktester(config).run(shocked, [pair])
+
+    base_eq = base["equity_curve"].loc[:cutoff]
+    after_eq = after["equity_curve"].loc[:cutoff]
+    pd.testing.assert_series_equal(base_eq, after_eq)

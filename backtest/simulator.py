@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
-from screening.cointegration import test_pair_cointegration
+from screening.cointegration import is_market_neutral, test_pair_cointegration
 from signals.spread import KalmanHedgeRatio, SignalConfig, generate_signals, rolling_zscore
 
 DEFAULT_RECHECK_FREQ_DAYS = 60
@@ -152,6 +152,30 @@ def _prepare_pair_series(
     # missing-data-defaults-to-calm convention so a gap can't halt trading.
     if entries_allowed is not None:
         tradeable = tradeable & entries_allowed.reindex(tradeable.index).fillna(True)
+
+    # Market-neutrality gate. With spread = log(A) - beta*log(B), a NEGATIVE
+    # beta flips the hedge leg's sign, so a "short spread" is short A AND short
+    # B: a net directional bet with full market exposure, not the relative-value
+    # trade this engine is built to run (live: ABT/MRK beta=-0.578 => net
+    # -$15,800 of exposure on a $10k pair notional). A sign-flipping beta also
+    # signals the cointegrating vector isn't identified, so there's no stable
+    # relationship to revert to. Gate on the pair's own estimated hedge ratio
+    # (the full-sample OLS beta; the per-bar/regime betas share its sign in
+    # practice). Like every other gate here this blocks NEW entries only — it
+    # never forces an exit, so any open position still exits/stops normally.
+    if config.signal_config.require_positive_hedge_ratio:
+        # CAUSAL, per-bar: gate on the sign of the hedge ratio that was known AT
+        # each bar (regime_hedge_ratios comes from the rolling recheck, which only
+        # ever looks backwards). Fitting the sign on the FULL series would be
+        # look-ahead — the backtest would "know" in 2024 that a pair's beta turns
+        # negative in 2026 — and this engine guarantees causality (see
+        # test_backtest_equity_is_causal_to_future_prices). Bars before the first
+        # successful recheck have a NaN hedge ratio and are already untradeable.
+        # Entries-only, like every other gate here: open positions still exit/stop.
+        positive_beta = regime_hedge_ratios.apply(
+            lambda beta: bool(pd.notna(beta) and is_market_neutral(beta))
+        )
+        tradeable = tradeable & positive_beta
 
     if config.hedge_ratio_mode == "kalman_innovation":
         # Trade the filter's standardized one-step-ahead surprises directly.

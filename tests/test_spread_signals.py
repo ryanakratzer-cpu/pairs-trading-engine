@@ -202,3 +202,70 @@ def test_innovation_zscore_trades_the_cointegrated_fixture(cointegrated_pair_pri
 
     entries = signals["event"].isin(["ENTER_LONG_SPREAD", "ENTER_SHORT_SPREAD"]).sum()
     assert entries >= 1
+
+
+def test_entry_refused_at_or_beyond_the_stop_band_by_default():
+    """An entry at |z| >= stop_z is incoherent: the position would be
+    stop-eligible on its very first bar. Historically 24 of 63 entries fired
+    beyond the stop band, and those bogus "convergences" inflated the measured
+    thesis hit-rate from 41% to 86%. The guard is ON by default (max_entry_z
+    unset => stop_z), so these bars must emit NO_POSITION.
+    """
+    config = SignalConfig(zscore_window=3, entry_z=2.0, exit_z=0.5, stop_z=3.5)
+    zscore = pd.Series([-5.28, 3.5, -3.6])
+    result = generate_signals(zscore, config)
+
+    assert result["event"].tolist() == ["NO_POSITION", "NO_POSITION", "NO_POSITION"]
+    assert result["position"].tolist() == [0, 0, 0]
+
+
+def test_entry_still_taken_just_beyond_entry_z():
+    # The guard must only bite at the stop band, not suppress ordinary entries.
+    config = SignalConfig(zscore_window=3, entry_z=2.0, exit_z=0.5, stop_z=3.5)
+
+    short_side = generate_signals(pd.Series([2.05]), config)
+    assert short_side["event"].tolist() == ["ENTER_SHORT_SPREAD"]
+    assert short_side["position"].tolist() == [-1]
+
+    long_side = generate_signals(pd.Series([-2.05]), config)
+    assert long_side["event"].tolist() == ["ENTER_LONG_SPREAD"]
+    assert long_side["position"].tolist() == [1]
+
+    # Just INSIDE the stop band is still a legal entry.
+    near_stop = generate_signals(pd.Series([3.49]), config)
+    assert near_stop["event"].tolist() == ["ENTER_SHORT_SPREAD"]
+
+
+def test_entry_guard_does_not_interfere_with_an_open_position():
+    """Entries-only, like every other gate: a position opened legally must still
+    stop out and exit normally once |z| runs past the stop band.
+    """
+    config = SignalConfig(zscore_window=3, entry_z=2.0, exit_z=0.5, stop_z=3.5)
+    # Enter short at 2.5, blow through the stop at 3.6, then z=4.0 must NOT
+    # re-enter (guard), and finally a calm bar leaves us flat.
+    zscore = pd.Series([2.5, 3.0, 3.6, 4.0, 0.1])
+    result = generate_signals(zscore, config)
+
+    assert result["event"].tolist() == [
+        "ENTER_SHORT_SPREAD",
+        "HOLD",
+        "STOP_LOSS",
+        "NO_POSITION",
+        "NO_POSITION",
+    ]
+
+    # And an EXIT from an open position is likewise unaffected by the guard.
+    exiting = generate_signals(pd.Series([-2.5, -0.3]), config)
+    assert exiting["event"].tolist() == ["ENTER_LONG_SPREAD", "EXIT"]
+
+
+def test_explicit_max_entry_z_overrides_the_stop_z_default():
+    config = SignalConfig(zscore_window=3, entry_z=2.0, exit_z=0.5, stop_z=3.5, max_entry_z=2.5)
+    result = generate_signals(pd.Series([2.6, 2.2]), config)
+
+    assert result["event"].tolist() == ["NO_POSITION", "ENTER_SHORT_SPREAD"]
+
+
+def test_max_entry_z_must_exceed_entry_z():
+    with pytest.raises(ValueError):
+        SignalConfig(entry_z=2.0, exit_z=0.5, stop_z=3.5, max_entry_z=1.5)

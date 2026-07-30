@@ -7,7 +7,7 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 import statsmodels.api as sm
-from statsmodels.tsa.stattools import adfuller
+from statsmodels.tsa.stattools import adfuller, coint
 
 DEFAULT_SIGNIFICANCE = 0.05
 DEFAULT_MIN_HALF_LIFE_DAYS = 5.0
@@ -26,6 +26,24 @@ class EngleGrangerResult:
     adf_pvalue: float
     is_cointegrated: bool
     half_life_days: float | None
+    # WHY these two extra fields exist:
+    # `adf_pvalue` above comes from running a PLAIN adfuller() on the residuals
+    # of an ESTIMATED cointegrating regression. Standard ADF critical values
+    # assume the tested series was observed, not fitted; OLS deliberately picks
+    # the beta that makes the residual look as stationary as possible, so the
+    # true null distribution has a fatter left tail than the ADF tables.
+    # The bias is ONE-DIRECTIONAL: adf_pvalue is systematically TOO SMALL, i.e.
+    # biased TOWARD declaring cointegration. The correct reference distribution
+    # is Engle-Granger/MacKinnon, which statsmodels.tsa.stattools.coint applies.
+    # Observed live (2026-07-29): ABT/MRK 0.0104 -> 0.0402, ALL/TRV 0.0045 ->
+    # 0.0197, DUK/SO 0.0111 -> 0.0426, COP/SLB 0.0051 -> 0.0220, and
+    # COST/PEP 0.0393 -> 0.1207, which crosses 0.05 (our test says cointegrated,
+    # the proper test does not).
+    # `is_cointegrated` is intentionally left on the biased ADF p-value so this
+    # change is purely additive; `eg_disagrees` makes the stricter verdict
+    # VISIBLE instead of silently re-gating the whole book.
+    eg_pvalue: float | None = None
+    eg_disagrees: bool = False
 
 
 @dataclass(frozen=True)
@@ -44,6 +62,27 @@ class OutOfSampleResult:
 
 def _to_series(prices: pd.Series, use_log_prices: bool) -> pd.Series:
     return np.log(prices) if use_log_prices else prices
+
+
+def is_market_neutral(hedge_ratio: float) -> bool:
+    """True iff a spread built with this hedge ratio is actually market-neutral.
+
+    The spread is defined as spread = log(A) - beta * log(B), so trading the
+    spread means taking OPPOSITE-sign exposure to A and B only when beta > 0
+    (e.g. beta=+0.8: short spread => short A, long 0.8*B — the two legs offset,
+    and a market-wide move largely cancels).
+
+    When beta < 0 the hedge leg's sign flips: -beta * log(B) becomes a POSITIVE
+    coefficient, so a "short spread" is short A AND short B. That is a net
+    directional bet on the market, not a relative-value bet — it has full beta
+    exposure and none of the mean-reversion protection the strategy relies on.
+    Observed live: ABT/MRK at beta=-0.578 implied net -$15,800 of exposure on a
+    nominal $10k pair notional. A negative beta is also a symptom rather than
+    just an inconvenience: it usually means the cointegrating vector is not
+    identified (COST/PEP flipped from -0.74 to -0.642 inside a year), so the
+    "relationship" being traded is not stable enough to mean-revert to.
+    """
+    return hedge_ratio > 0
 
 
 def test_pair_cointegration(
@@ -72,6 +111,21 @@ def test_pair_cointegration(
     adf_stat, adf_pvalue, *_ = adfuller(spread, autolag="AIC")
     is_cointegrated = adf_pvalue < significance
 
+    # Proper Engle-Granger/MacKinnon p-value on the SAME series in the SAME
+    # order (A regressed on B). adf_pvalue above uses standard ADF critical
+    # values on ESTIMATED residuals and is therefore biased toward
+    # "cointegrated" (see EngleGrangerResult for the measured magnitudes).
+    # Reported alongside rather than replacing it: is_cointegrated keeps its
+    # existing semantics, and eg_disagrees flags where the stricter test
+    # overturns our verdict.
+    try:
+        _eg_stat, eg_pvalue_raw, *_ = coint(a, b)
+        eg_pvalue = float(eg_pvalue_raw)
+    except (ValueError, np.linalg.LinAlgError):
+        eg_pvalue = None
+
+    eg_disagrees = eg_pvalue is not None and adf_pvalue < significance <= eg_pvalue
+
     half_life = compute_half_life(pd.Series(spread)) if is_cointegrated else None
 
     return EngleGrangerResult(
@@ -83,6 +137,8 @@ def test_pair_cointegration(
         adf_pvalue=float(adf_pvalue),
         is_cointegrated=is_cointegrated,
         half_life_days=half_life,
+        eg_pvalue=eg_pvalue,
+        eg_disagrees=eg_disagrees,
     )
 
 
@@ -258,7 +314,16 @@ def screen_universe(
             "hedge_ratio": result.hedge_ratio,
             "adf_stat": result.adf_stat,
             "adf_pvalue": result.adf_pvalue,
+            # Stricter, correctly-distributed Engle-Granger p-value plus a flag
+            # for pairs our biased ADF p-value passes and it rejects. Purely
+            # informational — `tradeable` is deliberately NOT re-gated on it.
+            "eg_pvalue": result.eg_pvalue,
+            "eg_disagrees": result.eg_disagrees,
             "is_cointegrated": result.is_cointegrated,
+            # A negative hedge ratio makes both legs same-signed => net
+            # directional, not market-neutral. Flagged here; the backtester's
+            # require_positive_hedge_ratio gate is what actually blocks entries.
+            "market_neutral": is_market_neutral(result.hedge_ratio),
             "half_life_days": result.half_life_days,
             "passes_half_life_filter": passes_half_life,
             "tradeable": result.is_cointegrated and passes_half_life,

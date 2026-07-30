@@ -57,6 +57,49 @@ def non_cointegrated_pair_prices(business_day_index):
 
 
 @pytest.fixture
+def negative_beta_pair_panel(business_day_index):
+    """Panel whose two tickers cointegrate with a NEGATIVE hedge ratio.
+
+    NEG is built against an INVERTED log_bbb, so OLS recovers beta ~= -0.9.
+    spread = log(NEG) - beta*log(BBB) then has a same-signed hedge leg, i.e.
+    trading it is net directional rather than market-neutral — exactly the
+    ABT/MRK and COST/PEP situation the require_positive_hedge_ratio gate
+    exists to block. The OU spread is strong enough that the pair still passes
+    the re-cointegration checks, so the gate is the ONLY thing stopping it.
+    """
+    n = len(business_day_index)
+    log_bbb = _make_random_walk(n, sigma=0.01, x0=np.log(60), seed=10)
+    ou_spread = _make_ou_series(n, theta=0.12, mu=0.0, sigma=0.02, x0=0.0, seed=11)
+    # +2*log(60) keeps prices positive despite the inverted loading.
+    log_neg = -0.9 * log_bbb + ou_spread + 2 * np.log(60)
+
+    panel = pd.DataFrame(
+        {"NEG": np.exp(log_neg), "BBB": np.exp(log_bbb)},
+        index=business_day_index,
+    )
+    return panel, ("NEG", "BBB")
+
+
+@pytest.fixture
+def eg_disagreement_pair_prices(business_day_index):
+    """A weakly mean-reverting pair reproducing the live COST/PEP disagreement.
+
+    The naive ADF-on-estimated-residuals p-value lands just under 0.05 while
+    the proper Engle-Granger/MacKinnon p-value lands well above it — measured
+    here at ~0.039 vs ~0.120, essentially the live COST/PEP numbers
+    (0.0393 vs 0.1207). theta=0.03 makes reversion slow enough to sit in that
+    borderline band.
+    """
+    n = len(business_day_index)
+    log_b = _make_random_walk(n, sigma=0.01, x0=np.log(60), seed=20)
+    ou_spread = _make_ou_series(n, theta=0.03, mu=0.0, sigma=0.02, x0=0.0, seed=120)
+    log_a = 0.9 * log_b + ou_spread
+    price_a = pd.Series(np.exp(log_a), index=business_day_index, name="A")
+    price_b = pd.Series(np.exp(log_b), index=business_day_index, name="B")
+    return price_a, price_b
+
+
+@pytest.fixture
 def known_half_life_ou_series(business_day_index):
     n = len(business_day_index)
     theta = 0.15

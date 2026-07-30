@@ -21,6 +21,21 @@ class SignalConfig:
     # divergence waiting for the price stop. Rule of thumb: 2-3x the pair's
     # half-life. None disables it.
     max_holding_bars: int | None = None
+    # Refuse a NEW entry when |z| >= this. An entry at or beyond the stop band
+    # is incoherent: the position is stop-eligible the instant it opens, so it
+    # is not a mean-reversion trade at all — it either bounces a fraction and
+    # scores as a spurious "convergence" or stops out immediately. An audit of
+    # 63 historical entries found 24 fired beyond the stop band, and that
+    # artifact alone inflated the measured thesis hit-rate from 41% to 86%.
+    # None means "use config.stop_z" (see generate_signals) — the guard is
+    # therefore ACTIVE by default; set a float to override, or a value above
+    # stop_z to effectively disable it.
+    max_entry_z: float | None = None
+    # Block new entries on pairs whose hedge ratio is negative. With
+    # spread = log(A) - beta*log(B), beta < 0 flips the hedge leg's sign, so
+    # both legs end up the same direction: net directional, not market-neutral.
+    # Enforced in backtest.simulator._prepare_pair_series.
+    require_positive_hedge_ratio: bool = True
 
     def __post_init__(self) -> None:
         if not (0 < self.exit_z < self.entry_z < self.stop_z):
@@ -29,6 +44,8 @@ class SignalConfig:
             raise ValueError("zscore_window must be >= 2")
         if self.max_holding_bars is not None and self.max_holding_bars < 1:
             raise ValueError("max_holding_bars must be >= 1 (or None to disable)")
+        if self.max_entry_z is not None and self.max_entry_z <= self.entry_z:
+            raise ValueError("max_entry_z must be > entry_z (or None to default to stop_z)")
 
 
 class HedgeRatioModel(ABC):
@@ -204,9 +221,17 @@ def generate_signals(
     how a failed rolling re-cointegration check disables a pair going forward.
     Returns a DataFrame with columns zscore, position ({-1, 0, 1}), and event
     (labeled state transition).
+
+    New entries additionally require |z| < config.max_entry_z (defaulting to
+    config.stop_z when unset). Opening a position at or beyond the stop band is
+    incoherent — it would be stop-eligible on its very first bar — so those
+    bars emit NO_POSITION. The guard applies ONLY to entries: an already-open
+    position still exits, time-exits, and stops on its own terms.
     """
     if tradeable is None:
         tradeable = pd.Series(True, index=zscore.index)
+
+    max_entry_z = config.max_entry_z if config.max_entry_z is not None else config.stop_z
 
     positions: list[int] = []
     events: list[str] = []
@@ -223,6 +248,11 @@ def generate_signals(
             continue
 
         if position == 0:
+            # An entry at |z| >= max_entry_z (default stop_z) is instantly
+            # stop-eligible, so refuse it rather than open a doomed position.
+            if abs(z) >= max_entry_z:
+                can_enter = False
+
             if can_enter and z > config.entry_z:
                 position = -1
                 bars_held = 0
