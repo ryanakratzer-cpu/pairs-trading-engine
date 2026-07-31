@@ -10,12 +10,31 @@ survived) combined with a passing full-window screen, then deduplicated to
 one pair per sector so the book is genuinely diversified rather than five
 costumes on one insurance-sector bet.
 
-Selection (see Pairs Trading Engine Implementation Log, 2026-07-19/20):
-ranked by walk-forward formation-passes, excluding structural near-twins
-(share classes / duplicate-index ETFs) and half-life < 5d. The insurance
-cluster (ALL/TRV/AIG/PRU/MET all co-moved) contributes exactly one slot,
-ALL/TRV — the only candidate that was also out-of-sample validated on the
-2026-07-19 screen.
+RECONSTITUTED 2026-07-30 on much stricter evidence. The prior book was selected
+on walk-forward persistence using p-values we later proved were biased: the
+screen ran plain ADF on ESTIMATED residuals with standard critical values,
+overstating significance 2-4x. Re-screened all 248 candidate pairs with the
+PROPER Engle-Granger test on the trailing 252 days — the same window the engine
+actually fits beta on — only 15 pairs survived, and only ONE member of the old
+book (DUK/SO) was among them. ABT/MRK, COST/PEP, COP/SLB and ALL/TRV all failed
+(EG p 0.11 to 0.56, and the first two additionally had NEGATIVE betas, meaning
+they were never market-neutral at all).
+
+Current admission rules, all four required:
+  1. proper Engle-Granger p < 0.05 on the trailing 252d window (not full history,
+     not the biased ADF-on-residuals p-value);
+  2. hedge ratio POSITIVE and in [0.25, 4.0] — positive so the position is
+     genuinely long-one/short-other, and bounded because a beta near zero
+     (e.g. AIG/TRV at +0.063) leaves the trade ~94% net directional despite
+     nominally being a pair;
+  3. half-life inside the 5-30 day tradeable band;
+  4. no structural near-twins and one pair per sector. This excludes
+     stock-vs-own-sector-ETF constructions that the raw screen loved —
+     CL/XLP (EG p=0.0027) and NVDA/SMH (0.0150) both ranked highly but CL is a
+     constituent of XLP and NVDA of SMH, so their spreads are mechanically
+     tight. It also collapses the AIG insurance cluster (AIG/PRU, AIG/ALL,
+     AIG/MET, AIG/TRV) and the NVDA semis cluster to one slot each, and drops
+     GDX/IAU as a duplicate of GDX/GLD (IAU and GLD are both gold bullion).
 
 This is a research watchlist, not a trade list. Nothing here places an order.
 Revisit the membership when a fresh walk-forward run materially changes the
@@ -44,33 +63,43 @@ class FocusPair:
         return f"{self.ticker_a}/{self.ticker_b}"
 
 
-# Ordered by walk-forward persistence (formation-passes) at selection time.
+# Ordered by proper Engle-Granger p-value on the trailing 252d window
+# (measured 2026-07-30; all betas fit on that SAME window, not full history).
 FOCUS_BOOK: list[FocusPair] = [
     FocusPair(
-        "ABT", "MRK", "healthcare",
-        "large-cap healthcare (devices/diagnostics vs pharma); 4/5 formation "
-        "passes, full-window p=0.006, half-life ~17d",
-    ),
-    FocusPair(
-        "ALL", "TRV", "insurance",
-        "P&C insurers; the insurance cluster's single slot — 4/5 formation "
-        "passes AND out-of-sample validated 2026-07-19, half-life ~12d "
-        "(shortest of the book), full-window p=0.009",
-    ),
-    FocusPair(
         "DUK", "SO", "utilities",
-        "regulated southeastern utilities; 4/5 formation passes, "
-        "full-window p=0.008, half-life ~18d",
+        "regulated southeastern utilities; the ONLY survivor of the previous "
+        "book. EG p=0.0027 on 252d, beta +0.893 (well balanced), half-life 8.0d. "
+        "Strongest genuine cointegration in the book.",
     ),
     FocusPair(
-        "COST", "PEP", "consumer_staples",
-        "consumer staples (warehouse retail vs beverages/snacks); 3/5 "
-        "formation passes, full-window p=0.047, half-life ~29d",
+        "JNJ", "MRK", "healthcare",
+        "large-cap pharma pair; REPLACES ABT/MRK, which had a NEGATIVE beta "
+        "(-0.578, never market-neutral) and EG p=0.56 on 252d. "
+        "EG p=0.0106, beta +0.799, half-life 6.4d.",
     ),
     FocusPair(
-        "COP", "SLB", "energy",
-        "energy (E&P vs oilfield services); 3/5 formation passes, "
-        "full-window p=0.007, half-life ~17d",
+        "AVGO", "NVDA", "semis",
+        "semiconductor duo; the NVDA cluster's single slot (NVDA/SMH excluded "
+        "as stock-vs-own-sector-ETF, NVDA/TXN and NVDA/QCOM as lower-ranked "
+        "same-cluster). EG p=0.0122, beta +1.236, half-life 7.2d.",
+    ),
+    FocusPair(
+        "GDX", "GLD", "metals_commodities",
+        "gold miners vs bullion — the project's original deep-dive pair, now "
+        "qualifying on strict evidence for the first time. EG p=0.0185, "
+        "beta +1.419, half-life 7.3d. GDX/IAU dropped as a duplicate.",
+    ),
+    FocusPair(
+        "ROST", "TGT", "discount_retail",
+        "off-price vs big-box retail. EG p=0.0435, beta +0.966 (near dollar-"
+        "neutral), half-life 12.1d — the longest holding period in the book.",
+    ),
+    FocusPair(
+        "GD", "RTX", "defense",
+        "defense primes. EG p=0.0474 — the weakest member, admitted at the "
+        "margin; first candidate to drop at the next refresh. beta +0.448, "
+        "half-life 8.0d.",
     ),
 ]
 

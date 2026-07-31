@@ -144,14 +144,21 @@ def test_record_session_return_conventions(tmp_path, close_panel, ohlc_panel, se
     _record(path, close_panel, ohlc_panel, session.strftime("%Y-%m-%d"))
     row = pd.read_csv(path).iloc[0]
 
+    # UPDATED 2026-07-30: the anchor is the PRIOR SESSION'S CLOSE, not this
+    # session's open. The strategy holds positions overnight (6-12 day
+    # half-lives), so an open->close window silently discards the overnight gap
+    # — which on 2026-07-30 was the entire day's P&L (+$252 real vs -$43
+    # booked). This assertion previously encoded the open->close convention and
+    # is deliberately changed, not weakened: it still pins an exact value.
     h = float(row["hedge_ratio"])
-    open_a = ohlc_panel.loc[session, ("Open", "AAA")]
-    open_b = ohlc_panel.loc[session, ("Open", "BBB")]
+    prior_session = close_panel.index[close_panel.index.get_loc(session) - 1]
+    anchor_a = close_panel.loc[prior_session, "AAA"]
+    anchor_b = close_panel.loc[prior_session, "BBB"]
     close_a = close_panel.loc[session, "AAA"]
     close_b = close_panel.loc[session, "BBB"]
 
     expected_move = 100.0 * (
-        (np.log(close_a) - h * np.log(close_b)) - (np.log(open_a) - h * np.log(open_b))
+        (np.log(close_a) - h * np.log(close_b)) - (np.log(anchor_a) - h * np.log(anchor_b))
     )
     assert row["spread_move_pct"] == pytest.approx(expected_move)
     assert row["strategy_return_pct"] == pytest.approx(
@@ -161,10 +168,16 @@ def test_record_session_return_conventions(tmp_path, close_panel, ohlc_panel, se
         row["strategy_return_pct"] / 100.0 * NOTIONAL
     )
 
-    # Leg + benchmark returns are simple open->close percents off the haircuts.
+    # Per-leg returns stay open->close: they are intraday DIAGNOSTICS, not the
+    # benchmarked performance number.
     assert row["ticker_a_return_pct"] == pytest.approx(100.0 * (1 / 0.990 - 1))
     assert row["ticker_b_return_pct"] == pytest.approx(100.0 * (1 / 0.995 - 1))
-    assert row["spy_return_pct"] == pytest.approx(100.0 * (1 / 0.998 - 1))
+    # UPDATED 2026-07-30: the benchmark now uses the SAME close-to-close window
+    # as strategy_return_pct. Comparing an overnight-inclusive strategy return
+    # against an intraday-only SPY would make excess_return_pct meaningless.
+    spy_prior = close_panel.loc[prior_session, "SPY"]
+    spy_close = close_panel.loc[session, "SPY"]
+    assert row["spy_return_pct"] == pytest.approx(100.0 * (spy_close / spy_prior - 1))
     # Excess is benchmarked against what WE earned, not against the spread move.
     assert row["excess_return_pct"] == pytest.approx(
         row["strategy_return_pct"] - row["spy_return_pct"]
@@ -727,3 +740,34 @@ def test_record_session_runs_the_gated_production_path(tmp_path, close_panel, oh
     assert list(pd.read_csv(path).columns) == PERFORMANCE_COLUMNS
     # Gated or not, a recorded position is still one of the three valid states.
     assert int(row["position"]) in (-1, 0, 1)
+
+
+def test_overnight_gap_is_captured_not_discarded(tmp_path, close_panel, ohlc_panel, session_dates):
+    """REGRESSION (2026-07-30): the tracker measured OPEN->CLOSE, so for a
+    strategy that holds overnight the gap between yesterday's close and today's
+    open was invisible. Live, that hid the entire day's P&L: the tracker booked
+    ABT/MRK at -$43 (intraday) while close-to-close was +$252.
+
+    Build a session whose overnight gap is large and whose intraday move is
+    nearly nil; the recorded move must reflect the GAP, not ~0.
+    """
+    session = session_dates[60]
+    prior = session_dates[59]
+
+    closes = close_panel.copy()
+    # Today's closes jump well away from yesterday's closes...
+    closes.loc[session, "AAA"] = closes.loc[prior, "AAA"] * 1.05
+    closes.loc[session, "BBB"] = closes.loc[prior, "BBB"]
+    ohlc = pd.concat({"Open": closes * 1.0, "Close": closes}, axis=1)
+    # ...and today's OPEN equals today's CLOSE, so the intraday move is exactly 0.
+    ohlc.loc[session, ("Open", "AAA")] = closes.loc[session, "AAA"]
+    ohlc.loc[session, ("Open", "BBB")] = closes.loc[session, "BBB"]
+
+    path = tmp_path / "perf.csv"
+    assert _record(path, closes, ohlc, session.strftime("%Y-%m-%d")) == 1
+    row = pd.read_csv(path).iloc[0]
+
+    # Under the OLD open->close convention this would have been ~0.0.
+    assert abs(row["spread_move_pct"]) > 1.0, (
+        "overnight gap was discarded: spread_move_pct is ~0 despite a 5% gap"
+    )

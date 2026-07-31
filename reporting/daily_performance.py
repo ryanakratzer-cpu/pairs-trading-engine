@@ -250,8 +250,13 @@ def record_session(
     elif verbose:
         print(f"[daily_performance] recording completed session {session_date.date()}")
 
+    # Benchmark on the SAME window as the strategy (close-to-close), otherwise
+    # excess_return_pct compares an overnight-inclusive strategy return against
+    # an intraday-only benchmark and is meaningless.
     spy_open, spy_close = _leg_prices(opens_all, closes_all, benchmark, session_date)
-    spy_return_pct = _pct_return(spy_open, spy_close)
+    spy_prior = closes[benchmark].loc[:session_date]
+    spy_anchor = float(spy_prior.iloc[-2]) if len(spy_prior) >= 2 else spy_open
+    spy_return_pct = _pct_return(spy_anchor, spy_close)
 
     rows: list[dict] = []
     for ticker_a, ticker_b in pairs:
@@ -375,8 +380,21 @@ def _session_row(
     open_z_series = rolling_zscore(open_spread_series, signal_config.zscore_window)
     open_z = float(open_z_series.iloc[-1]) if pd.notna(open_z_series.iloc[-1]) else np.nan
 
-    # Diagnostic: position-agnostic log-spread change over the session.
-    spread_open = float(np.log(open_a) - hedge_ratio * np.log(open_b))
+    # CLOSE-TO-CLOSE, not open-to-close. The strategy HOLDS positions overnight
+    # (half-lives are 6-12 days), so the overnight gap is real P&L on a real
+    # position. Measuring open->close makes it invisible: on 2026-07-30 the
+    # tracker booked ABT/MRK at -$43 (intraday) when the true close-to-close
+    # result was +$252 — the overnight gap WAS the entire day. Anchor on the
+    # prior session's close; fall back to this session's open only when there
+    # is no prior bar (first session on record), which is the one case where
+    # open->close is the only honest window available.
+    prior = history[ticker_a].index[-2] if len(history) >= 2 else None
+    if prior is not None:
+        anchor_a = float(history[ticker_a].iloc[-2])
+        anchor_b = float(history[ticker_b].iloc[-2])
+    else:
+        anchor_a, anchor_b = open_a, open_b
+    spread_open = float(np.log(anchor_a) - hedge_ratio * np.log(anchor_b))
     spread_close = float(np.log(close_a) - hedge_ratio * np.log(close_b))
     spread_move_pct = float(100.0 * (spread_close - spread_open))
     # What WE earned: apply the position. Flat (0) earns exactly 0.0 - the
