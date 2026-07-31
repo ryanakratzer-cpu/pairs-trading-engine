@@ -96,6 +96,9 @@ PERFORMANCE_COLUMNS = [
     "close_z",
     "signal",
     "position",
+    # The position actually HELD across the session (prior bar's state). On an
+    # EXIT day this is non-zero while `position` is 0 — P&L accrues on THIS one.
+    "position_held",
     "strategy_return_pct",
     "spread_move_pct",
     "pair_pnl_usd",
@@ -365,6 +368,13 @@ def _session_row(
     entries_allowed = event_exclusion_mask(zscore.index) if apply_event_gate else None
     signals = generate_signals(zscore, signal_config, tradeable=entries_allowed)
     latest = signals.iloc[-1]
+    # The position we HELD across this session is the PRIOR bar's position, not
+    # today's post-signal state. On an EXIT day those differ and it matters
+    # enormously: 2026-07-31 DUK/SO held a short spread all day, the spread moved
+    # -0.87% in our favour (+$86), then the signal exited at the close — and the
+    # tracker booked $0.00 because the end-of-day position was flat. That zeroes
+    # out every WINNING EXIT, i.e. exactly the days P&L is realized.
+    position_held = int(signals["position"].iloc[-2]) if len(signals) >= 2 else 0
     close_z = float(latest["zscore"]) if pd.notna(latest["zscore"]) else np.nan
     position = int(latest["position"])
     signal = str(latest["event"])
@@ -397,9 +407,10 @@ def _session_row(
     spread_open = float(np.log(anchor_a) - hedge_ratio * np.log(anchor_b))
     spread_close = float(np.log(close_a) - hedge_ratio * np.log(close_b))
     spread_move_pct = float(100.0 * (spread_close - spread_open))
-    # What WE earned: apply the position. Flat (0) earns exactly 0.0 - the
+    # What WE earned: apply the position HELD over the window (see position_held
+    # above), not the post-signal state. Flat (0) earns exactly 0.0 - the
     # `or 0.0` normalizes a -0.0 product so a flat row never prints "-0.0".
-    strategy_return_pct = float(position * spread_move_pct) or 0.0
+    strategy_return_pct = float(position_held * spread_move_pct) or 0.0
     # Derived from strategy_return_pct by construction so the dollar figure and
     # the percentage figure can never disagree.
     pair_pnl_usd = float(strategy_return_pct / 100.0 * notional) or 0.0
@@ -416,6 +427,7 @@ def _session_row(
         "close_z": close_z,
         "signal": signal,
         "position": position,
+        "position_held": position_held,
         "strategy_return_pct": strategy_return_pct,
         "spread_move_pct": spread_move_pct,
         "pair_pnl_usd": pair_pnl_usd,

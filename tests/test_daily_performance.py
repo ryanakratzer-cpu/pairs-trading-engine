@@ -162,7 +162,7 @@ def test_record_session_return_conventions(tmp_path, close_panel, ohlc_panel, se
     )
     assert row["spread_move_pct"] == pytest.approx(expected_move)
     assert row["strategy_return_pct"] == pytest.approx(
-        int(row["position"]) * expected_move
+        int(row["position_held"]) * expected_move
     )
     assert row["pair_pnl_usd"] == pytest.approx(
         row["strategy_return_pct"] / 100.0 * NOTIONAL
@@ -197,7 +197,7 @@ def test_recorded_flat_session_earns_nothing(tmp_path, close_panel, ohlc_panel, 
         if _record(path, close_panel, ohlc_panel, session_dates[i].strftime("%Y-%m-%d")) != 1:
             continue
         row = pd.read_csv(path).iloc[0]
-        if int(row["position"]) != 0:
+        if int(row["position_held"]) != 0:
             continue
         flat_seen += 1
         assert row["strategy_return_pct"] == 0.0
@@ -219,7 +219,7 @@ def test_recorded_pnl_and_return_agree_in_sign(tmp_path, close_panel, ohlc_panel
         assert np.sign(row["pair_pnl_usd"]) == np.sign(row["strategy_return_pct"])
         # A short position inverts the spread move; a long one passes it through.
         assert row["strategy_return_pct"] == pytest.approx(
-            int(row["position"]) * row["spread_move_pct"]
+            int(row["position_held"]) * row["spread_move_pct"]
         )
 
 
@@ -239,6 +239,11 @@ def short_entry_panels(session_dates):
     t = np.arange(n)
     base = 0.01 * np.where(t % 2 == 0, 1.0, -1.0)
     base[AS_OF_POS] = 0.03
+    # ...and keep rising the NEXT session, so that on AS_OF_POS+1 the short is
+    # HELD (entered at AS_OF_POS) while the spread moves further against it.
+    # Needed since P&L now accrues on position_held: on the entry bar itself we
+    # hold nothing yet, so the entry session correctly books 0.
+    base[AS_OF_POS + 1] = 0.05
     log_b = np.log(100.0) + 0.004 * np.sin(t / 5.0)
     closes = pd.DataFrame(
         {
@@ -260,10 +265,12 @@ def test_short_spread_session_with_positive_spread_move_loses(tmp_path, short_en
     closes, ohlc = short_entry_panels
     path = tmp_path / "perf.csv"
 
-    assert _record(path, closes, ohlc, session_dates[AS_OF_POS].strftime("%Y-%m-%d")) == 1
+    # AS_OF_POS+1: the short was entered on the prior bar, so it is HELD across
+    # this session while the spread rises further against it.
+    assert _record(path, closes, ohlc, session_dates[AS_OF_POS + 1].strftime("%Y-%m-%d")) == 1
     row = pd.read_csv(path).iloc[0]
 
-    assert int(row["position"]) == -1
+    assert int(row["position_held"]) == -1
     assert row["spread_move_pct"] > 0  # the spread moved AGAINST the short
     assert row["strategy_return_pct"] < 0
     assert row["pair_pnl_usd"] < 0
@@ -771,3 +778,33 @@ def test_overnight_gap_is_captured_not_discarded(tmp_path, close_panel, ohlc_pan
     assert abs(row["spread_move_pct"]) > 1.0, (
         "overnight gap was discarded: spread_move_pct is ~0 despite a 5% gap"
     )
+
+
+def test_winning_exit_is_not_booked_as_zero(tmp_path, close_panel, ohlc_panel, session_dates):
+    """REGRESSION (2026-07-31): P&L used the POST-signal position, so on an EXIT
+    day — when the position was held all session and the profit is actually
+    realized — the tracker booked $0.00. Live: DUK/SO held a short spread, the
+    spread moved -0.87% in our favour (+$86), signal EXITed at the close, and the
+    row recorded 0.0. That zeroes out every winning exit.
+
+    Sweep sessions for an EXIT row and assert it books the P&L of the position
+    HELD, not of the flat end-of-day state.
+    """
+    exits_seen = 0
+    for i in range(45, 80):
+        path = tmp_path / f"perf_{i}.csv"
+        if _record(path, close_panel, ohlc_panel, session_dates[i].strftime("%Y-%m-%d")) != 1:
+            continue
+        row = pd.read_csv(path).iloc[0]
+        if str(row["signal"]) not in ("EXIT", "STOP_LOSS", "TIME_EXIT"):
+            continue
+        exits_seen += 1
+        assert int(row["position"]) == 0, "an exit leaves us flat at the close"
+        assert int(row["position_held"]) != 0, "but we HELD a position through the session"
+        # The session's P&L must reflect the held position, not the flat state.
+        assert row["strategy_return_pct"] == pytest.approx(
+            row["position_held"] * row["spread_move_pct"]
+        )
+        assert row["strategy_return_pct"] != 0.0
+
+    assert exits_seen > 0, "fixture produced no exit sessions to regression-test"
