@@ -1,5 +1,29 @@
 # Pairs Trading Engine
 
+> **Current model (as of 2026-08-01).** The focus book was reconstituted on
+> 2026-07-30 after we proved the screen's p-values were biased: it ran plain ADF
+> on *estimated* residuals with standard critical values, overstating
+> significance 2–4×. Re-screening all 248 candidate pairs with the **proper
+> Engle–Granger test on the trailing 252 days** — the window the hedge ratio is
+> actually fit on — left **15 survivors out of 248**, and only one member of the
+> previous book among them.
+>
+> **Book:** DUK/SO (EG p=0.0027) · JNJ/MRK (0.0106) · AVGO/NVDA (0.0122) ·
+> GDX/GLD (0.0185) · ROST/TGT (0.0435) · GD/RTX (0.0474). Admission requires
+> EG p<0.05 on 252d, a **positive** hedge ratio inside [0.25, 4.0], a 5–30 day
+> half-life, no structural near-twins, and one pair per sector.
+>
+> **First clean live result (2026-07-31):** DUK/SO completed a full
+> mean-reversion cycle — z +1.11 → +0.02, exited on the model's own rule for
+> **+$86.57 (+0.87%)**. Profit came from spread *convergence* on a genuinely
+> market-neutral pair, not from directional drift. One session is sample size
+> one and is treated as such.
+>
+> **Honest state of the evidence:** an audit of 55 historical round trips found a
+> 42% entry hit-rate and +$118 total on $100k over 2.5 years — statistically
+> indistinguishable from zero. The recent work has made the engine *more honest*,
+> not yet demonstrably profitable. See "Known limitations" below.
+
 Cointegration-based statistical arbitrage research and backtesting engine.
 Screens a candidate universe of tickers for pairs whose price relationship is
 statistically mean-reverting (Engle-Granger two-step test), sizes and times

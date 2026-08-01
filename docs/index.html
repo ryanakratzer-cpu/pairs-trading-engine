@@ -21,8 +21,18 @@
 <body>
 <div class="wrap">
   <h1>Pairs Trading Engine</h1>
-  <div class="sub">Cointegration-based statistical arbitrage research &mdash; interactive dashboards (GDX/GLD focus pair)</div>
+  <div class="sub">Cointegration-based statistical arbitrage research &mdash; interactive dashboards</div>
   <div class="disclaimer"><b>Research only, not investment advice.</b> This engine generates and studies signals; it never places orders and has no broker connectivity.</div>
+
+  <div class="card" style="border:1px solid #6cb4ff">
+    <a href="interactive_predictions_vs_market.html">&#9733; Model predictions vs what the market did</a>
+    <p><b>Current focus book (reconstituted 2026-07-30).</b> Six pairs, each passing the <i>proper</i>
+    Engle&ndash;Granger test on the trailing 252 days with a positive, bounded hedge ratio:
+    DUK/SO, JNJ/MRK, AVGO/NVDA, GDX/GLD, ROST/TGT, GD/RTX. Shows the live z-score paths against the
+    entry/exit bands, every signal the model fired, the FOMC blackout window, and a scorecard of
+    predictions that were <b>pre-registered before each open and graded mechanically from prices</b>
+    (8 hits / 4 misses so far), plus a calibration panel comparing stated confidence to realised hit rate.</p>
+  </div>
 
   <div class="card">
     <a href="interactive_montecarlo_GDX_GLD.html">Monte Carlo fan chart &mdash; 1,000 OU spread paths</a>
