@@ -67,6 +67,11 @@ SECTOR_ETF_TICKERS: frozenset[str] = frozenset(
 )
 
 MIN_HALF_LIFE_DAYS = 5.0
+# Hedge-ratio band, mirroring screening/focus_book.py's admission rules. Positive
+# only (a negative beta is not market-neutral) and bounded away from zero (a beta
+# near 0 means the "hedge" leg is negligible and the trade is directional).
+MIN_BETA = 0.25
+MAX_BETA = 4.0
 DEFAULT_TOP_N = 5
 # A pair must clear ADF at this level on the FULL window to count as genuinely
 # cointegrated for ranking. Matches the project-wide default significance.
@@ -225,22 +230,35 @@ def build_ranking(
     # passes_screen mirrors the screen's own tradeable verdict when present.
     df["passes_screen"] = df["tradeable"].astype(bool) if "tradeable" in df.columns else False
 
-    # Full-window cointegration gate: use the screen's own is_cointegrated flag
-    # when present, else fall back to the ADF p-value; require a computable
-    # half-life too (no half-life => no established mean-reversion to trade).
-    if "is_cointegrated" in df.columns:
+    # Cointegration gate — prefer the PROPER Engle-Granger p-value. The screen's
+    # is_cointegrated / adf_pvalue come from plain ADF on ESTIMATED residuals
+    # with standard critical values, which is biased toward "cointegrated" by
+    # 2-4x (measured live: COST/PEP 0.0393 ours vs 0.1207 proper — it crosses
+    # 0.05 and flips the verdict). Falling back to the biased flag would let this
+    # monthly refresh propose pairs the 2026-07-30 book reconstitution rejected.
+    if "eg_pvalue" in df.columns and df["eg_pvalue"].notna().any():
+        coint = df["eg_pvalue"] < COINT_SIGNIFICANCE
+    elif "is_cointegrated" in df.columns:
         coint = df["is_cointegrated"].astype(bool)
     else:
         coint = df["adf_pvalue"] < COINT_SIGNIFICANCE
     df["is_cointegrated_full"] = coint & df["half_life_days"].notna()
 
-    # Exclusions: structural near-twins, stock-vs-own-sector-ETF basis pairs,
-    # and sub-5-day half-lives. A NaN half-life (pair not cointegrated on the
-    # full window) is NOT excluded here — it simply carries no half-life
-    # evidence and, now, sinks below every cointegrated pair on the ranking key.
+    # Exclusions, matching the book's own admission rules (screening/focus_book.py):
+    #   - structural near-twins and stock-vs-own-sector-ETF basis pairs;
+    #   - half-life outside the tradeable band;
+    #   - hedge ratio must be POSITIVE and inside [MIN_BETA, MAX_BETA]. Positive
+    #     because a negative beta flips the hedge leg's sign (the position becomes
+    #     short-both / long-both — directional, not market-neutral). Bounded
+    #     because a beta near zero leaves the trade almost entirely directional
+    #     despite nominally being a pair: AIG/PRU had the best EG p-value in the
+    #     whole universe (0.0002) at beta +0.191, i.e. ~94% net directional.
     df = df[~df.apply(lambda r: _is_near_twin(r["ticker_a"], r["ticker_b"]), axis=1)]
     df = df[~df.apply(lambda r: _is_stock_vs_own_sector_etf(r["ticker_a"], r["ticker_b"], universe), axis=1)]
     df = df[~(df["half_life_days"] < MIN_HALF_LIFE_DAYS)]
+    if "hedge_ratio" in df.columns:
+        beta = pd.to_numeric(df["hedge_ratio"], errors="coerce")
+        df = df[beta.between(MIN_BETA, MAX_BETA)]
 
     df["label"] = df["ticker_a"] + "/" + df["ticker_b"]
     df["sector_a"] = df["ticker_a"].map(lambda t: mapping.get(t, "unknown"))

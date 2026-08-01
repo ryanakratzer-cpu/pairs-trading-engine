@@ -364,3 +364,42 @@ def test_build_history_record_captures_challenger_and_screen_flag():
     assert record["date"] == "2026-07-21"
     assert record["members"]["DUK/SO"]["challenger"] == "D/XLU"
     assert record["members"]["DUK/SO"]["challenger_passes_screen"] is False
+
+
+def test_refresh_admission_matches_the_books_own_rules():
+    """The monthly refresh must not propose pairs the book's admission rules
+    reject, or it will contradict screening/focus_book.py every month.
+
+    Pins the three rules aligned on 2026-07-31: proper EG p-value (not the
+    biased ADF-on-residuals one) drives the cointegration gate, and the hedge
+    ratio must be positive and bounded away from zero.
+    """
+    screen = pd.DataFrame(
+        [
+            # Good pair: passes on BOTH tests, sane beta -> must survive.
+            {**_screen_row("DUK", "SO", adf_pvalue=0.005, half_life=8.0), "eg_pvalue": 0.003,
+             "hedge_ratio": 0.89},
+            # Biased-p trap: our ADF says cointegrated, proper EG says NOT.
+            {**_screen_row("COST", "PEP", adf_pvalue=0.039, half_life=14.0), "eg_pvalue": 0.121,
+             "hedge_ratio": 0.48},
+            # Negative beta: never market-neutral, must be excluded outright.
+            {**_screen_row("ABT", "MRK", adf_pvalue=0.010, half_life=17.0), "eg_pvalue": 0.040,
+             "hedge_ratio": -0.578},
+            # Near-zero beta: nominally a pair, ~94% directional in practice.
+            {**_screen_row("AIG", "TRV", adf_pvalue=0.0001, half_life=9.0), "eg_pvalue": 0.0002,
+             "hedge_ratio": 0.063},
+        ]
+    )
+    ranked = build_ranking(screen, EMPTY_SURVIVAL)
+    labels = set(ranked["label"])
+
+    assert "DUK/SO" in labels
+    assert "ABT/MRK" not in labels, "negative beta must be excluded"
+    assert "AIG/TRV" not in labels, "near-zero beta must be excluded"
+    # COST/PEP survives the exclusions but must NOT count as cointegrated:
+    # the proper EG p-value (0.121) rejects it even though our ADF p (0.039) does not.
+    cost = ranked[ranked["label"] == "COST/PEP"]
+    if len(cost):
+        assert not bool(cost.iloc[0]["is_cointegrated_full"])
+    duk = ranked[ranked["label"] == "DUK/SO"].iloc[0]
+    assert bool(duk["is_cointegrated_full"])
