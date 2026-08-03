@@ -19,10 +19,28 @@
 > market-neutral pair, not from directional drift. One session is sample size
 > one and is treated as such.
 >
-> **Honest state of the evidence:** an audit of 55 historical round trips found a
-> 42% entry hit-rate and +$118 total on $100k over 2.5 years — statistically
-> indistinguishable from zero. The recent work has made the engine *more honest*,
-> not yet demonstrably profitable. See "Known limitations" below.
+> **Honest state of the evidence (corrected 2026-08-03).** A three-way quant
+> review found the strategy has **no measurable gross alpha at daily frequency**,
+> and that earlier headline figures were wrong in two ways.
+>
+> - Run across all **248 candidate pairs** (n = 1,681–3,460 round trips), gross
+>   P&L per trade is **−$7.54 to +$0.62** — indistinguishable from zero, before
+>   the ~20bp round-trip cost. Net across the universe: **−$33k to −$95k**.
+> - The previously-quoted "55 trades / 42% hit-rate / +$118" describes the
+>   **retired** book, not this one, and was **selection bias**: the six book
+>   pairs show +$67/trade while the other 242 show −$23/trade, with all of the
+>   book's outperformance in the half of the sample it was selected on.
+> - The screen is **anti-predictive** on this data: pairs with EG p<0.05 earned
+>   *less* than pairs with p≥0.05, and the 5–30 day half-life admission band was
+>   the worst-performing region.
+> - The book deploys **~1.3% of capital** and trades ~6 times/year. At that rate
+>   a live forward test needs **~91 trades (≈15 years)** to distinguish the
+>   most optimistic estimated edge from zero.
+>
+> Treat this repository as a **research and measurement exercise**, not a
+> strategy with demonstrated edge. Its most durable output so far is the
+> discipline of catching its own errors — eight measurement bugs found and fixed,
+> each of which had misrepresented results. See "Known limitations" below.
 
 Cointegration-based statistical arbitrage research and backtesting engine.
 Screens a candidate universe of tickers for pairs whose price relationship is
