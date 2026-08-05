@@ -63,9 +63,69 @@ class FocusPair:
         return f"{self.ticker_a}/{self.ticker_b}"
 
 
-# Ordered by proper Engle-Granger p-value on the trailing 252d window
-# (measured 2026-07-30; all betas fit on that SAME window, not full history).
+# ---------------------------------------------------------------------------
+# 2026-08-05 BREADTH REBUILD — 12 pairs, up from 6.
+#
+# WHY: the binding constraint was never signal quality, it was shots on goal.
+# The 6-pair book deployed ~1.3% of capital and traded ~6x/year, which needs
+# ~91 trades (~15 years) to distinguish its best-case edge from zero. Trade
+# count and capital utilisation scale with the number of QUALIFYING pairs, so
+# the universe was widened 105 -> 303 tickers (248 -> 919 candidate pairs) and
+# re-screened under IDENTICAL admission rules. Qualifiers went 15 -> 34.
+#
+# The beta band is also TIGHTENED here to [0.70, 1.40] (was [0.25, 4.0]).
+# Reason: the engine z-scores on log(A) - beta*log(B) but holds equal dollars,
+# so the traded portfolio only matches the signalled portfolio when beta is
+# near 1. At beta 0.45 (the retired GD/RTX) those are different positions.
+# Tightening drops 34 -> 15 candidates, from which this is one pair per sector.
+#
+# NOTE ON MULTIPLE TESTING, stated plainly: 919 tests at p<0.05 would throw off
+# roughly 46 false positives by chance alone. The count that survived every
+# filter is 34. These pairs are therefore NOT established discoveries — they are
+# the best-evidenced candidates available, and the book's purpose is to generate
+# enough trades to be measurable, not to assert an edge exists.
+# ---------------------------------------------------------------------------
 FOCUS_BOOK: list[FocusPair] = [
+    FocusPair("FNV", "WPM", "gold_royalties",
+        "gold royalty/streaming duo — identical business model, same metal, no "
+        "mine-operating risk. Best evidence in the whole 919-pair screen. "
+        "EG p=0.0007, beta +0.764, half-life 8.2d."),
+    FocusPair("EPD", "OKE", "midstream",
+        "midstream energy infrastructure — fee-based, volume-driven, same "
+        "basins. EG p=0.0017, beta +0.857, half-life 5.4d."),
+    FocusPair("AVGO", "NVDA", "semis",
+        "semiconductor duo; carried over from the previous book. "
+        "EG p=0.0124, beta +1.213, half-life 6.6d."),
+    FocusPair("JNJ", "MRK", "pharma",
+        "large-cap pharma; carried over from the previous book. "
+        "EG p=0.0130, beta +0.792, half-life 6.4d."),
+    FocusPair("AU", "NEM", "gold_miners",
+        "gold producers — distinct from the royalty slot above (operating "
+        "leverage vs none). EG p=0.0148, beta +1.222, half-life 6.5d."),
+    FocusPair("ADBE", "CRM", "software",
+        "enterprise SaaS majors — same seat-based subscription economics. "
+        "EG p=0.0178, beta +1.079, half-life 6.6d."),
+    FocusPair("CHD", "CL", "household_products",
+        "household/personal care staples. EG p=0.0246, beta +0.834, hl 6.8d."),
+    FocusPair("SRE", "XEL", "utilities",
+        "regulated utilities; REPLACES DUK/SO, which decayed from EG p=0.0027 "
+        "to 0.0510 in four sessions and failed its own admission test. "
+        "EG p=0.0354, beta +1.018, half-life 7.3d."),
+    FocusPair("ROST", "TGT", "discount_retail",
+        "off-price vs big-box retail; carried over. EG p=0.0389, beta +0.948, "
+        "half-life 11.0d."),
+    FocusPair("APD", "LIN", "industrial_gases",
+        "industrial gases — a near-duopoly with near-identical cost structures. "
+        "EG p=0.0440, beta +0.789, half-life 8.1d."),
+    FocusPair("AMGN", "VRTX", "biotech",
+        "large-cap biotech. EG p=0.0457, beta +1.215, half-life 7.6d."),
+    FocusPair("FITB", "RF", "regional_banks",
+        "regional banks — same rate/deposit-beta exposure. Weakest member, "
+        "admitted at the margin. EG p=0.0492, beta +1.281, half-life 8.4d."),
+]
+
+# Retired 2026-08-05 (kept for the audit trail):
+_RETIRED_2026_08_05: list[FocusPair] = [
     FocusPair(
         "DUK", "SO", "utilities",
         "regulated southeastern utilities; the ONLY survivor of the previous "

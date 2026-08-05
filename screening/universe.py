@@ -31,6 +31,48 @@ SECTOR_ETFS: dict[str, list[str]] = {
     "homebuilders": ["DHI", "LEN", "PHM", "TOL"],
     "exchanges": ["CME", "ICE", "NDAQ", "CBOE"],
     "rates_credit": ["TLT", "IEF", "LQD", "HYG"],
+    # 2026-08-05 BREADTH WIDENING. The binding constraint on this strategy is
+    # not signal quality — it is shots on goal. Measured: the 6-pair book
+    # deployed ~1.3% of capital and traded ~6 times/year, which needs ~91 trades
+    # (~15 years) to distinguish its most optimistic edge estimate from zero.
+    # Trade count and capital utilisation scale with the number of QUALIFYING
+    # pairs, and admission is deliberately strict, so the only lever is a much
+    # larger candidate pool. These groups add liquid large-caps whose members
+    # share a genuine within-industry economic driver (the thing that makes a
+    # spread mean-revert) rather than simply adding tickers.
+    "software": ["CRM", "ADBE", "INTU", "NOW", "WDAY", "SNOW", "PANW", "FTNT"],
+    "internet": ["AMZN", "NFLX", "BKNG", "ABNB", "UBER", "DASH", "EBAY"],
+    "media": ["DIS", "CMCSA", "WBD", "PARA", "FOXA", "LYV"],
+    "pharma": ["LLY", "BMY", "AMGN", "GILD", "BIIB", "VRTX", "REGN", "ZTS"],
+    "medtech": ["MDT", "SYK", "BSX", "EW", "ZBH", "BAX", "ISRG"],
+    "health_insurers": ["CI", "ELV", "HUM", "CNC", "MOH"],
+    "big_banks_regional": ["USB", "PNC", "TFC", "FITB", "KEY", "RF", "CFG", "HBAN"],
+    "asset_managers": ["BLK", "BX", "KKR", "APO", "TROW", "BEN", "IVZ"],
+    "reits": ["AMT", "PLD", "CCI", "EQIX", "SPG", "O", "PSA", "DLR"],
+    "restaurants": ["MCD", "SBUX", "CMG", "YUM", "DRI", "QSR"],
+    "apparel_retail": ["NKE", "LULU", "GPS", "ANF", "URBN", "DECK"],
+    "big_box": ["WMT", "TGT", "COST", "BJ", "DG", "DLTR"],
+    "beverages": ["KO", "PEP", "MNST", "KDP", "STZ", "TAP"],
+    "household_products": ["PG", "CL", "KMB", "CHD", "CLX", "EL"],
+    "chemicals": ["LIN", "APD", "SHW", "ECL", "DD", "DOW", "PPG"],
+    "machinery": ["CAT", "DE", "CMI", "PCAR", "ETN", "EMR", "ROK", "PH"],
+    "aerospace": ["BA", "LMT", "NOC", "RTX", "GD", "LHX", "TDG", "HWM"],
+    "rails_freight": ["UNP", "CSX", "NSC", "ODFL", "JBHT", "CHRW", "XPO"],
+    "midstream": ["KMI", "WMB", "OKE", "EPD", "ET", "TRGP"],
+    "oil_majors_ep": ["EOG", "PXD", "DVN", "FANG", "HES", "OXY", "APA", "MRO"],
+    "oil_services": ["HAL", "BKR", "NOV", "FTI", "CHX"],
+    "gold_miners": ["NEM", "GOLD", "AEM", "KGC", "AU", "WPM", "FNV"],
+    "steel_materials": ["NUE", "STLD", "X", "CLF", "FCX", "AA", "MP"],
+    "utilities_wide": ["EXC", "XEL", "ED", "WEC", "ES", "PEG", "SRE", "PCG"],
+    "telecom_towers": ["VZ", "T", "TMUS", "LUMN"],
+    "payments_fintech": ["PYPL", "SQ", "FIS", "FISV", "GPN", "COIN"],
+    "semis_wide": ["INTC", "MU", "ADI", "NXPI", "MCHP", "ON", "SWKS", "MRVL"],
+    "hardware": ["DELL", "HPQ", "HPE", "STX", "WDC", "NTAP", "CSCO", "ANET"],
+    "staffing_services": ["ADP", "PAYX", "CTAS", "FAST", "GWW", "WM", "RSG"],
+    "tobacco_spirits": ["MO", "PM", "BTI", "DEO"],
+    "autos_wide": ["F", "GM", "TSLA", "RIVN", "LCID", "APTV", "BWA", "LEA"],
+    "cruise_travel": ["CCL", "RCL", "NCLH", "MAR", "HLT", "EXPE"],
+    "sector_etfs_wide": ["XLY", "XLC", "XLB", "XLRE", "XBI", "IBB", "KRE", "ITB", "XOP", "XME"],
 }
 
 KNOWN_PAIRS: list[tuple[str, str]] = [
