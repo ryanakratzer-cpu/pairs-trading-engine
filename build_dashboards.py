@@ -41,7 +41,9 @@ ROOT = Path(__file__).resolve().parent
 OUT = ROOT / "outputs"
 DOCS = ROOT / "docs"
 TRACK = OUT / "daily_performance.csv"
-FORECAST_DIR = ROOT.parent / "forecasts"
+# Inside the repo (moved 2026-08-05) so the pre-registered prediction record
+# travels with the code — a clone of this repo is the complete project.
+FORECAST_DIR = ROOT / "forecasts"
 
 BG = "#10151f"; GRID = "#2a3346"; INK = "#d6deeb"; MUTED = "#7b879c"
 BLUE = "#5aa2f0"; GREEN = "#4fbf7e"; RED = "#e05c5c"; AMBER = "#f5b942"

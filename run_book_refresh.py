@@ -42,9 +42,10 @@ from screening.universe import default_universe, generate_candidate_pairs
 
 LOOKBACK_DAYS = 900
 TOP_N = 5
-REPORT_DIR = Path(
-    r"C:\Users\ryana\OneDrive\Desktop\Ryan's Obsidian\01_RAW_CLIPS\quant_research\book_refresh_reports"
-)
+# Inside the repo (moved 2026-08-05). Was a hardcoded absolute Windows path,
+# which meant the monthly proposal record never reached GitHub and the script
+# could not run on another machine. A clone is now the complete project.
+REPORT_DIR = Path(__file__).resolve().parent / "book_refresh_reports"
 # Hysteresis history: the record of prior refreshes the governance rule reads to
 # decide whether drift is sustained (same screen-passing challenger for N runs)
 # rather than a one-month blip.

@@ -1,6 +1,7 @@
 # HANDOFF — Pairs Trading Engine
 
 **Written 2026-08-05. Read this before touching anything.**
+**This repository is SELF-CONTAINED — a clone is the complete project.** Code, the pre-registered forecast record, book-refresh proposals, the track record, the published dashboards and the project diary all live inside it.
 Compiled from three independent read-only audits (architecture / dashboards+data / findings+history).
 
 ---
@@ -32,9 +33,9 @@ Do not present any performance number from this repo as evidence of edge. The RE
 | Vault parent | `...\01_RAW_CLIPS\quant_research` |
 | GitHub | `https://github.com/ryanakratzer-cpu/pairs-trading-engine` (branch `main`) |
 | GitHub Pages | `https://ryanakratzer-cpu.github.io/pairs-trading-engine/` (source: `main` / `docs`) |
-| Forecasts | `...\quant_research\forecasts\forecast_YYYY-MM-DD.md` |
-| Book refresh reports | `...\quant_research\book_refresh_reports\` |
-| Project diary | `...\quant_research\Pairs Trading Engine Implementation Log.md` ⚠️ **ends 2026-07-31, stale** |
+| Forecasts | `<repo>/forecasts/forecast_YYYY-MM-DD.md` — **moved into the repo 2026-08-05** |
+| Book refresh reports | `<repo>/book_refresh_reports/` — **moved into the repo 2026-08-05** |
+| Project diary | `<repo>\IMPLEMENTATION_LOG.md` ⚠️ **ends 2026-07-31, stale** |
 
 **Interpreter: `py`, never `python`** (the Store alias is broken on this machine).
 `py` → `C:\Users\ryana\AppData\Local\Python\pythoncore-3.14-64\python.exe` (3.14.5).
@@ -118,7 +119,7 @@ visualization/          plots.py (matplotlib PNG), interactive.py (Plotly HTML)
 | `run_screen.py [--journal]` | Full-universe live screen | Yes |
 | `run_walkforward.py` | The three out-of-sample studies | Yes |
 | `run_grade_decisions.py` | Historical decision hit-rates, both lenses | Yes |
-| `run_book_refresh.py` | Monthly proposal (writes OUTSIDE the repo) | Yes |
+| `run_book_refresh.py` | Monthly proposal → `<repo>/book_refresh_reports/` | Yes |
 | `run_montecarlo.py [A B]` | 1000-path OU + interactive dashboards | Yes |
 | `run_pair_study.py [A B]` | Single-pair 3-mode comparison | Yes |
 | `run_live_monitor.py [A B]` | Intraday websocket monitor | Yes |
@@ -223,7 +224,7 @@ All from the repo root. **Order matters** — grade the forecast BEFORE rebuildi
 2. **Post-close (≥16:35 ET)** — `py run_daily_tracker.py`
 3. **Grade the forecast** — append a `# RESULTS` section with a `| # | prediction | conf | HIT/MISS |` table. Predictions above are never edited.
 4. **Rebuild dashboards** — `py build_dashboards.py`
-5. **Publish** — `git add docs outputs/daily_performance.csv ../forecasts && git commit && git push`
+5. **Publish** — `git add -A && git commit && git push`
 
 Monthly: `py run_book_refresh.py` (proposal only).
 
@@ -283,7 +284,7 @@ Monthly: `py run_book_refresh.py` (proposal only).
 
 ## 12. Twenty gotchas
 
-1. `py`, not `python`. 2. Run from repo root. 3. **yfinance `end` is EXCLUSIVE** — add a day. 4. The CSV cache can freeze an incomplete panel; delete `data_cache/*.csv` before debugging stale data. 5. `position` vs `position_held`. 6. `spread_move_pct` is not a return. 7. Two p-values; `is_cointegrated` uses the biased one. 8. `_is_stock_vs_own_sector_etf` only applies in `book_refresh`/`focus_book`. 9. β band divergence between `book_refresh` and `focus_book`. 10. Gates never force exits. 11. Missing data = allowed/calm. 12. Dollar-neutral ≠ beta-weighted. 13. `kalman` mode under-trades by design; don't raise `kalman_innovation_obs_variance` to 1e-3. 14. `run_book_refresh.py` writes outside the repo to a hardcoded absolute path. 15. The book is 12 pairs now — check `len(FOCUS_BOOK)`, don't trust prose. 16. `.gitignore` excludes `outputs/interactive_*.html` but `docs/` copies ARE tracked. 17. `generate_daily_signal_report` has no memory across runs. 18. `holding_days` is calendar days; `max_holding_bars` is bars. 19. `compute_half_life` returns None on no reversion. 20. Path contains an apostrophe (`Ryan's Obsidian`) — always double-quote it.
+1. `py`, not `python`. 2. Run from repo root. 3. **yfinance `end` is EXCLUSIVE** — add a day. 4. The CSV cache can freeze an incomplete panel; delete `data_cache/*.csv` before debugging stale data. 5. `position` vs `position_held`. 6. `spread_move_pct` is not a return. 7. Two p-values; `is_cointegrated` uses the biased one. 8. `_is_stock_vs_own_sector_etf` only applies in `book_refresh`/`focus_book`. 9. β band divergence between `book_refresh` and `focus_book`. 10. Gates never force exits. 11. Missing data = allowed/calm. 12. Dollar-neutral ≠ beta-weighted. 13. `kalman` mode under-trades by design; don't raise `kalman_innovation_obs_variance` to 1e-3. 14. (FIXED 2026-08-05) `run_book_refresh.py` used to write outside the repo to a hardcoded absolute path; it now writes to `<repo>/book_refresh_reports`. 15. The book is 12 pairs now — check `len(FOCUS_BOOK)`, don't trust prose. 16. `.gitignore` excludes `outputs/interactive_*.html` but `docs/` copies ARE tracked. 17. `generate_daily_signal_report` has no memory across runs. 18. `holding_days` is calendar days; `max_holding_bars` is bars. 19. `compute_half_life` returns None on no reversion. 20. Path contains an apostrophe (`Ryan's Obsidian`) — always double-quote it.
 
 ---
 

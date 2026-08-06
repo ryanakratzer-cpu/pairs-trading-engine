@@ -1,0 +1,27 @@
+[
+  {
+    "date": "2026-07-23",
+    "members": {
+      "ABT/MRK": {
+        "challenger": null,
+        "challenger_passes_screen": false
+      },
+      "ALL/TRV": {
+        "challenger": "AIG/PRU",
+        "challenger_passes_screen": false
+      },
+      "DUK/SO": {
+        "challenger": null,
+        "challenger_passes_screen": false
+      },
+      "COST/PEP": {
+        "challenger": null,
+        "challenger_passes_screen": false
+      },
+      "COP/SLB": {
+        "challenger": null,
+        "challenger_passes_screen": false
+      }
+    }
+  }
+]
